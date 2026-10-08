@@ -1,0 +1,71 @@
+# ============================================================
+# Biped hardware configuration
+# ============================================================
+
+# Two physical ST3215 servo buses are used.
+#
+# Board 1:
+#   /dev/ttyACM0 -> right leg
+#   IDs: 7, 8, 9, 10, 11, 12
+#
+# Board 2:
+#   /dev/ttyACM1 -> left leg
+#   IDs: 2, 3, 4, 5, 6, 13
+#
+# Keep port = auto.
+# bus_factory.py automatically discovers which IDs are present
+# on each serial port.
+
+bus:
+  port: auto
+  baud_rate: 1000000
+  timeout_s: 0.01
+  expect_echo: false
+
+loop:
+  rate_hz: 50
+  command_timeout_s: 0.5
+
+safety:
+  # ST3215 torque limit: 0..1000
+  torque_limit: 500
+
+  # Maximum commanded joint velocity in radians/sec.
+  max_joint_speed_rad_s: 1.2
+
+  # Slower speed used immediately after torque is enabled.
+  soft_start_speed_rad_s: 0.35
+
+  # Maximum servo speed command in steps/sec.
+  servo_speed_cap_steps_s: 1500
+
+  # Servo acceleration command.
+  servo_accel: 30
+
+  # Keep commands slightly inside the mechanical/URDF limits.
+  limit_margin_rad: 0.02
+
+  # Safety limits.
+  max_temperature_c: 65
+  min_voltage_v: 6.0
+
+  # IMPORTANT:
+  # Keep false while we are calibrating/testing.
+  # Torque must be explicitly enabled through the ROS service.
+  torque_off_on_shutdown: true
+
+pid:
+  # Do not modify servo EEPROM PID values automatically.
+  apply: false
+
+  p: 32
+  d: 16
+  i: 0
+
+imu:
+  enabled: true
+  i2c_bus: 7
+  address: 0x28
+  mode: imupLus
+  rate_hz: 100
+  frame_id: imu_link

@@ -1,0 +1,103 @@
+# ============================================================================
+#  servos.yaml — one entry per joint, in the SAME ORDER as the controller
+#  (robotv2_description/config/controllers.yaml).  The order IS the index into
+#  /position_controller/commands, so do not reorder.
+#
+#    id          servo ID on the bus (taken from AsterisCrack/BipedRobotJetson config/robot.yaml)
+#    direction   +1 / -1 : maps servo rotation to the URDF joint direction.
+#                Starting values from that repo.  VERIFY them with:  ros2 run biped_hardware biped_calibrate directions
+#    zero_steps  encoder reading (0..4095) when the joint is at 0 rad (legs straight, feet flat).
+#                2048 = the servo's own mid-point (set it with:  biped_calibrate zero).
+#    lower/upper soft limits in radians (the URDF joint limits).  The bridge keeps `limit_margin_rad`
+#                (hardware.yaml) inside these.  Tighten them for your robot with: biped_calibrate ranges
+#
+#  Your own measurements are written by biped_calibrate to ~/.config/biped/calibration.yaml and override
+#  zero_steps / direction / lower / upper here.  This file stays pristine.
+# ============================================================================
+joint_order:
+  - r_hip_yaw
+  - r_hip_roll_joint
+  - r_hip_pitch_joint
+  - r_knee_joint
+  - r_ankle_pitch_joint
+  - r_ankle_roll_joint
+  - l_hip_yaw
+  - l_hip_roll_joint
+  - l_hip_pitch_joint
+  - l_knee_joint
+  - l_ankle_pitch_joint
+  - l_ankle_roll_joint
+
+servos:
+  r_hip_yaw:
+    id: 7
+    direction: -1
+    zero_steps: 2048
+    lower: -0.785398
+    upper: 0.785398
+  r_hip_roll_joint:
+    id: 8
+    direction: +1
+    zero_steps: 2048
+    lower: -0.436332
+    upper: 1.570796
+  r_hip_pitch_joint:
+    id: 9
+    direction: +1
+    zero_steps: 2048
+    lower: -1.570796
+    upper: 1.570796
+  r_knee_joint:
+    id: 10
+    direction: +1
+    zero_steps: 2048
+    lower: -2.094395
+    upper: 2.094395
+  r_ankle_pitch_joint:
+    id: 12
+    direction: +1
+    zero_steps: 2048
+    lower: -0.610865
+    upper: 1.48353
+  r_ankle_roll_joint:
+    id: 11
+    direction: +1
+    zero_steps: 2048
+    lower: -1.396263
+    upper: 1.396263
+  l_hip_yaw:
+    id: 13
+    direction: +1
+    zero_steps: 2048
+    lower: -0.785398
+    upper: 0.785398
+  l_hip_roll_joint:
+    id: 2
+    direction: -1
+    zero_steps: 2048
+    lower: -0.436332
+    upper: 1.570796
+  l_hip_pitch_joint:
+    id: 3
+    direction: -1
+    zero_steps: 2048
+    lower: -1.570796
+    upper: 1.570796
+  l_knee_joint:
+    id: 4
+    direction: -1
+    zero_steps: 2048
+    lower: -2.094395
+    upper: 2.094395
+  l_ankle_pitch_joint:
+    id: 6
+    direction: -1
+    zero_steps: 2048
+    lower: -0.610865
+    upper: 1.48353
+  l_ankle_roll_joint:
+    id: 5
+    direction: -1
+    zero_steps: 2048
+    lower: -1.396263
+    upper: 1.396263

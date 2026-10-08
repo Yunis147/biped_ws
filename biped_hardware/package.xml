@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>biped_hardware</name>
+  <version>0.1.0</version>
+  <description>Real-robot interface for the BipedRobot V2: Waveshare ST3215 servo bridge, BNO055 IMU node,
+    calibration tools and a hardware launch file. Same /position_controller/commands topic as the Gazebo setup.</description>
+  <maintainer email="you@example.com">biped</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robotv2_description</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <!-- IMU only (pip, on the robot computer):  pip install adafruit-pureio -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

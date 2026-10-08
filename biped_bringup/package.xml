@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>biped_bringup</name>
+  <version>0.1.0</version>
+  <description>Convenience launch files that start the robot description + the walking gait together,
+    for Gazebo or the real hardware.</description>
+  <maintainer email="you@example.com">biped</maintainer>
+  <license>MIT</license>
+  <exec_depend>robotv2_description</exec_depend>
+  <exec_depend>biped_hardware</exec_depend>
+  <exec_depend>biped_gait</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

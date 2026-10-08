@@ -1,0 +1,77 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Feet: high friction so the sole grips (original ROS1 file used 0.2, which is icy). -->
+  <gazebo reference="r_foot_link_1">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>100000.0</kp>
+    <kd>100.0</kd>
+  </gazebo>
+  <gazebo reference="l_foot_link_1">
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+    <kp>100000.0</kp>
+    <kd>100.0</kd>
+  </gazebo>
+
+  <!-- Other links: moderate friction. selfCollide from the ROS1 file is dropped on purpose:
+       overlapping neighbour meshes make it jitter in Gazebo Harmonic. -->
+  <gazebo reference="base_link">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="l_hip_lower_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="r_hip_lower_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="r_thigh_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="l_thigh_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="r_calf_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="l_calf_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="r_ankle_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="l_ankle_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="r_hip_upper_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  <gazebo reference="l_hip_upper_link_1">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+
+  <!-- IMU on the torso. Only produces data if the world loads the Sensors + IMU systems
+       (worlds/flat_world_imu.sdf). Harmless otherwise. -->
+  <gazebo reference="imu_link">
+    <sensor name="imu_sensor" type="imu">
+      <always_on>true</always_on>
+      <update_rate>100</update_rate>
+      <topic>imu</topic>
+      <gz_frame_id>imu_link</gz_frame_id>
+      <visualize>false</visualize>
+    </sensor>
+  </gazebo>
+
+</robot>
