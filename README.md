@@ -63,11 +63,17 @@ ros2 launch biped_mujoco mujoco.launch.py
 # Simulation + walking node
 ros2 launch biped_mujoco mujoco.launch.py walk:=true
 
-# No window (headless)
-ros2 launch biped_mujoco mujoco.launch.py headless:=true walk:=true
+
+```
+Once running, send walk commands in a new terminal:
+```bash
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'start'}"
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stop'}"
 ```
 
-Same walk commands as above. To push the robot:
+Other commands: `forward`, `backward`
+
+#To push the robot:
 ```bash
 ros2 topic pub --once /mujoco/push geometry_msgs/msg/WrenchStamped \
   "{header: {frame_id: base_link}, wrench: {force: {x: 3.0, y: 0.0, z: 0.0}}}"
@@ -118,11 +124,6 @@ ros2 run biped_hardware biped_calibrate show
 ### 5. Run the hardware
 
 ```bash
-# Hardware only (torque OFF at start — enable it manually after launch)
-ros2 launch biped_hardware hardware.launch.py
-
-# Enable torque
-ros2 service call /servo_bridge/torque std_srvs/srv/SetBool "{data: true}"
 
 # Hardware with torque ON at start (robot must be supported and ready)
 ros2 launch biped_hardware hardware.launch.py torque_on_start:=true
@@ -131,7 +132,13 @@ ros2 launch biped_hardware hardware.launch.py torque_on_start:=true
 ros2 launch biped_hardware hardware.launch.py torque_on_start:=true walk:=true
 ```
 
-Same walk commands as above.
+Once running, send walk commands in a new terminal:
+```bash
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'start'}"
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stop'}"
+```
+
+Other commands: `forward`, `backward`
 
 > **Before enabling torque:** make sure the robot is supported by a stand or held by hand, and that calibration is done. Torque enables holding at the current joint positions, then eases into commanded poses slowly.
 
