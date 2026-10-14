@@ -17,55 +17,130 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-## Simulation
+
+
+
+# BipedRobot V2
+
+Build once, then source every terminal:
+```bash
+cd ~/biped_ws && colcon build --symlink-install && source install/setup.bash
+```
+
+---
+
+## Gazebo Simulation
 
 ```bash
+# Simulation only
+ros2 launch biped_bringup sim.launch.py
+
+# Simulation + walking node
 ros2 launch biped_bringup sim.launch.py walk:=true
+```
+
+Once running, send walk commands in a new terminal:
+```bash
 ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'start'}"
 ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stop'}"
 ```
-`sim.launch.py` just includes `robotv2_description`'s `gazebo.launch.py` (`rviz:=true`, `world:=...` etc.
-all still work) and, with `walk:=true`, `biped_gait`'s `walk.launch.py`.
 
-## Real hardware
+Other commands: `forward`, `backward`
 
-**Read `docs/CALIBRATION.md` first and follow it in order — ID assignment, zero pose, and especially the
-direction check.** A flipped sign there is exactly the kind of thing that made the robot fall over
-repeatedly in simulation before the gait was tuned; on hardware it does the same thing, just with a real
-robot.
+---
 
-Dry run with no servos connected (everything behaves like real hardware at the packet level, including
-speed limits and a missing-servo error if you unplug something):
+## MuJoCo Simulation
+
+Install once if you haven't:
 ```bash
-ros2 launch biped_bringup hardware.launch.py mock:=true rviz:=true walk:=true
+pip install --user --break-system-packages mujoco
 ```
 
-Real robot, once calibrated:
 ```bash
-ros2 launch biped_bringup hardware.launch.py
-ros2 service call /servo_bridge/torque std_srvs/srv/SetBool "{data: true}"   # robot must be supported/ready
-ros2 launch biped_gait walk.launch.py                                        # in another terminal
+# Simulation only
+ros2 launch biped_mujoco mujoco.launch.py
+
+# Simulation + walking node
+ros2 launch biped_mujoco mujoco.launch.py walk:=true
+
+# No window (headless)
+ros2 launch biped_mujoco mujoco.launch.py headless:=true walk:=true
 ```
-Torque is OFF until that service call. `servo_bridge` refuses to enable torque if any servo doesn't
-answer. Once on, it eases into whatever pose is commanded at a slow soft-start speed rather than jumping.
-If `/position_controller/commands` stops arriving for 0.5 s, it holds the last pose (does not go limp, does
-not drift).
 
-## IMU
+Same walk commands as above. To push the robot:
+```bash
+ros2 topic pub --once /mujoco/push geometry_msgs/msg/WrenchStamped \
+  "{header: {frame_id: base_link}, wrench: {force: {x: 3.0, y: 0.0, z: 0.0}}}"
+```
 
-Published as `sensor_msgs/Imu` on `/imu` — same topic and message type in both sim and hardware. On
-hardware this is a BNO055 over I²C (`imu_node`, from `biped_hardware`); `mock:=true` substitutes a
-stationary reading so everything downstream keeps working with no sensor attached.
+Reset to standing pose:
+```bash
+ros2 service call /mujoco/reset std_srvs/srv/Trigger
+```
 
-## Documents
+---
 
-- `docs/CALIBRATION.md` — the calibration procedure.
-- `docs/walking_math_explained.md` — the complete derivation of every number the gait uses (centre of
-  mass, the support-polygon stability check, forward kinematics, the ZMP timing argument, and how the
-  flat-foot ankle angles are solved).
+## Real Hardware
 
-## Licensing note
+### 1. Check the port
 
-`biped_hardware`'s servo protocol layer (`biped_hardware/st3215/`, `serial_bus.py`) and the BNO055 driver
-are adapted from **AsterisCrack/BipedRobotJetson** (MIT). See `src/biped_hardware/NOTICE.md`. Everything
-else in this workspace was written for this project.
+```bash
+ls /dev/ttyUSB* /dev/ttyACM*
+```
+
+### 2. Scan the servo bus
+
+```bash
+ros2 run biped_hardware biped_scan
+```
+
+All 12 servos should answer. If any are missing, check the wiring and power.
+
+### 3. Calibration (first time only)
+
+```bash
+# Step 1: assign IDs (connect one servo at a time)
+ros2 run biped_hardware biped_set_id --guided
+
+# Step 2: set the zero pose (stand robot upright, move joints by hand)
+ros2 run biped_hardware biped_calibrate zero
+
+# Step 3: verify each joint moves the right direction
+ros2 run biped_hardware biped_calibrate directions
+```
+
+### 4. After calibration — check your settings
+
+```bash
+ros2 run biped_hardware biped_calibrate show
+```
+
+### 5. Run the hardware
+
+```bash
+# Hardware only (torque OFF at start — enable it manually after launch)
+ros2 launch biped_hardware hardware.launch.py
+
+# Enable torque
+ros2 service call /servo_bridge/torque std_srvs/srv/SetBool "{data: true}"
+
+# Hardware with torque ON at start (robot must be supported and ready)
+ros2 launch biped_hardware hardware.launch.py torque_on_start:=true
+
+# Hardware + walking node
+ros2 launch biped_hardware hardware.launch.py torque_on_start:=true walk:=true
+```
+
+Same walk commands as above.
+
+> **Before enabling torque:** make sure the robot is supported by a stand or held by hand, and that calibration is done. Torque enables holding at the current joint positions, then eases into commanded poses slowly.
+
+### Useful extras
+
+```bash
+# Fine-tune a joint's zero position by eye
+ros2 run biped_hardware biped_jog
+
+# Watch temperatures and voltage
+ros2 topic echo /diagnostics
+```
