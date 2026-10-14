@@ -1,0 +1,24 @@
+# Parameters for the MuJoCo simulation node.  Every value can also be set on the command line, e.g.
+#   ros2 launch biped_mujoco mujoco.launch.py kp:=45 torque_fraction:=0.5
+# The servo/contact numbers are ASSUMPTIONS, calibrated by experiment in docs/MUJOCO.md - not measurements of your robot.
+mujoco_biped:
+  ros__parameters:
+    headless: false            # true = no window (needs no display)
+    real_time_factor: 1.0      # 1 = real time, 0 = as fast as possible
+    publish_rate_hz: 100.0
+    push_duration_s: 0.1       # length of an external push sent to /mujoco/push
+
+    # --- servo model -------------------------------------------------------------------------------------------
+    stall_torque_nm: 1.912     # Waveshare ST3215: 19.5 kg.cm @ 7.4 V = 1.912 N.m  (30 kg.cm @ 12 V = 2.942 N.m)
+    torque_fraction: 1.0       # hardware torque_limit / 1000.  The gait still walks down to 0.4 (sustained load is small)
+    kp: 100.0                  # N.m/rad position-loop stiffness.  The gait works for >= 25, fails at 15.
+    damping_ratio: 1.0
+    armature: 0.005            # kg.m^2 reflected rotor inertia; servo damping is derived from it (0 = undamped = the gait falls)
+    damping: 0.05              # N.m.s/rad
+    frictionloss: 0.03         # N.m
+
+    # --- contact -----------------------------------------------------------------------------------------------
+    friction: 1.0              # gait is unaffected down to 0.2 (it does not slip)
+    contact_timeconst: 0.005   # s.  MuJoCo's default 0.02 is so soft the foot rolls onto its edge and the gait falls
+    timestep: 0.002
+    spawn_clearance: 0.002
