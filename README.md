@@ -7,7 +7,7 @@ changes.
 | package | what it is |
 |---|---|
 | `robotv2_description` | URDF, meshes, Gazebo bringup, RViz config. `use_sim:=true/false` switches whether the Gazebo-only parts (gz_ros2_control, the simulated IMU sensor) are included. |
-| `biped_gait` | `quasi_static_walk` — the open-loop quasi-static walking node. Identical in sim and on hardware. See `docs/walking_math_explained.md` for the full derivation of every constant in it. |
+| `biped_gait` | `quasi_static_walk` — the open-loop quasi-static walking node, shared by simulation and hardware. See [biped_gait/README.md](biped_gait/README.md) for the current foot-position gait and offline checks. |
 | `biped_hardware` | The real robot: `servo_bridge` (12× Waveshare ST3215 over a serial bus), `imu_node` (BNO055), and the `biped_scan` / `biped_set_id` / `biped_calibrate` / `biped_jog` command-line tools. Has a `mock:=true` mode that behaves like real servos at the packet level, with no hardware attached. |
 | `biped_bringup` | One-command launch files: `sim.launch.py`, `hardware.launch.py`. |
 
@@ -60,9 +60,8 @@ stationary reading so everything downstream keeps working with no sensor attache
 ## Documents
 
 - `docs/CALIBRATION.md` — the calibration procedure.
-- `docs/walking_math_explained.md` — the complete derivation of every number the gait uses (centre of
-  mass, the support-polygon stability check, forward kinematics, the ZMP timing argument, and how the
-  flat-foot ankle angles are solved).
+- `biped_gait/README.md` — the current gait, changed start/stop behavior, and offline checks.
+- `docs/walking_math_explained.md` — background maths and worked examples for the earlier gait.
 
 ## Licensing note
 
