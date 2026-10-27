@@ -9,8 +9,7 @@ WHAT IT DOES
   level and their heading fixed. The walking height leaves knee bend available
   at touchdown. Weight transfer and stopping preserve the planted-foot spacing.
   Start lowers into the walking stance; stop holds a centred, bent-knee stance
-  with the feet where they landed. On hardware, joint/IMU/bridge feedback gates
-  execution and liftoff. This is not an active balance or contact controller.
+  with the feet where they landed. No IMU or contact feedback is used.
   `python3 quasi_static_walk.py --check` validates the commanded geometry without ROS.
 
 COMMANDS   (topic /walk_cmd, std_msgs/String)
@@ -22,10 +21,6 @@ RUN IN GAZEBO  (use sim time so the gait follows the simulator clock)
   ros2 run biped_gait quasi_static_walk --ros-args -p use_sim_time:=true
 RUN ON THE REAL ROBOT (no sim time)
   ros2 run biped_gait quasi_static_walk
-  Hardware mode waits for torque ON, healthy bridge diagnostics, joint states,
-  and an IMU aligned with imu_link. It holds rather than advancing past a lagging
-  servo. It does not enable torque or change servo calibration/PID settings.
-  Send `status` on /walk_cmd for the current hardware hold reason.
 
 JOINT ORDER = controllers.yaml  (index: joint)
   0 r_hip_yaw  1 r_hip_roll  2 r_hip_pitch  3 r_knee  4 r_ankle_pitch  5 r_ankle_roll
@@ -458,94 +453,6 @@ def report(direction, kf, tables, log):
     return ok
 
 
-class HardwareFeedback:
-    """Measured execution checks; no actuator writes or guessed balance gains.
-
-    The IMU quaternion must describe the URDF imu_link axes (its fixed rotation
-    to base_link is identity). A support-margin estimate cannot detect contact
-    or compensate incorrect CAD masses, encoder zeros, or a flexible sole.
-    """
-
-    def __init__(self, tracking_tolerance=0.035, min_margin=0.005):
-        self.tracking_tolerance = tracking_tolerance
-        self.min_margin = min_margin
-        self.q = self.rotation = self.gyro = None
-        self.joint_time = self.imu_time = self.diagnostic_time = None
-        self.bridge_problem = 'waiting for /diagnostics from servo_bridge'
-
-    def joints(self, msg, now):
-        if len(msg.name) != len(msg.position) or len(set(msg.name)) != len(msg.name):
-            return
-        positions = dict(zip(msg.name, msg.position))
-        if not all(n in positions and math.isfinite(positions[n]) for n in JOINT_ORDER):
-            return
-        self.q = np.array([positions[n] for n in JOINT_ORDER])
-        self.joint_time = now
-
-    def imu(self, msg, now):
-        if msg.header.frame_id != 'imu_link' or msg.orientation_covariance[0] < 0:
-            return
-        o, g = msg.orientation, msg.angular_velocity
-        quat = np.array([o.x, o.y, o.z, o.w], dtype=float)
-        gyro = np.array([g.x, g.y, g.z], dtype=float)
-        norm = float(np.linalg.norm(quat))
-        if not np.all(np.isfinite(quat)) or not np.all(np.isfinite(gyro)) or norm < 1e-6:
-            return
-        x, y, z, w = quat / norm
-        self.rotation = np.array([
-            [1 - 2*(y*y + z*z), 2*(x*y - z*w), 2*(x*z + y*w)],
-            [2*(x*y + z*w), 1 - 2*(x*x + z*z), 2*(y*z - x*w)],
-            [2*(x*z - y*w), 2*(y*z + x*w), 1 - 2*(x*x + y*y)]])
-        self.gyro, self.imu_time = gyro, now
-
-    def diagnostics(self, msg, now):
-        for status in msg.status:
-            if status.name.rsplit('/', 1)[-1] != 'servo_bridge':
-                continue
-            values = {v.key: v.value for v in status.values}
-            self.diagnostic_time = now
-            if status.message != 'torque ON':
-                self.bridge_problem = 'servo torque is OFF; gait does not enable torque'
-            elif values.get('startup_positioning', 'false').lower() == 'true':
-                self.bridge_problem = 'bridge is still moving to its calibrated startup pose'
-            elif status.level > 0:
-                details = '; '.join(f'{k}: {v}' for k, v in values.items()
-                                    if any(s in v for s in ('not answering', 'LOW VOLTAGE', 'TOO HOT')))
-                self.bridge_problem = 'servo bridge health warning/error: ' + (details or status.message)
-            else:
-                self.bridge_problem = ''
-
-    def problem(self, now, target=None, liftoff=None):
-        for stamp, timeout, label in ((self.joint_time, .25, '/joint_states'),
-                                      (self.imu_time, .25, '/imu (frame imu_link)'),
-                                      (self.diagnostic_time, 2.5, '/diagnostics')):
-            if stamp is None or not 0 <= now - stamp <= timeout:
-                return f'missing/stale {label}'
-        if self.bridge_problem:
-            return self.bridge_problem
-        if target is not None:
-            error = np.abs(self.q - target)
-            i = int(np.argmax(error))
-            if error[i] > self.tracking_tolerance:
-                return f'{JOINT_ORDER[i]} tracking error {math.degrees(error[i]):.1f} deg'
-        tilt = math.acos(float(np.clip(self.rotation[2, 2], -1.0, 1.0)))
-        if tilt > math.radians(10):
-            return f'torso tilt {math.degrees(tilt):.1f} deg; support the robot (no fall recovery)'
-        if liftoff is not None:
-            q = dict(zip(JOINT_ORDER, self.q))
-            com, feet = _com_and_feet(q)
-            sole = feet[liftoff] @ self.rotation.T
-            com = self.rotation @ com
-            margin = _margin(_hull(sole[:, :2]), com[:2])
-            if margin < self.min_margin:
-                return f'{liftoff} stance estimated CoM margin {margin*1000:.1f} mm; need {self.min_margin*1000:.1f} mm'
-            if np.ptp(sole[:, 2]) > .001:
-                return f'{liftoff} stance sole is tilted; check IMU mounting, ankle tracking and floor'
-            if np.linalg.norm(self.gyro[:2]) > .10:
-                return 'torso is still rotating; waiting before liftoff'
-        return ''
-
-
 # ═══════════════════════════════════════════════════════════════════════
 #  ROS 2 NODE
 # ═══════════════════════════════════════════════════════════════════════
@@ -564,7 +471,7 @@ class QuasiStaticWalker(Node):
                 raise ValueError(f'{d} gait failed the geometry/balance check')
 
         self.neutral = np.zeros(12)
-        self.state = 'idle'              # idle | waiting (hardware) | walking
+        self.state = 'idle'              # idle | walking
         self.direction = 'forward'
         self.stop_req = False
         self._dwell_until = None
@@ -573,89 +480,40 @@ class QuasiStaticWalker(Node):
         self.T = 1.0
         self.t0 = 0.0
 
-        # Simulation retains its existing trajectory/timing. Hardware needs
-        # measured execution: a timer alone cannot tell whether a servo moved.
-        # The existing offline MuJoCo checker supplies a minimal Node without
-        # ROS parameters. Keep that adapter on its original open-loop path.
-        declare = getattr(self, 'declare_parameter', None)
-        def setting(name, default):
-            return declare(name, default).value if declare is not None else default
-        sim = self.get_parameter('use_sim_time').value if declare is not None else True
-        self.hardware_feedback = setting('hardware_feedback', not sim)
-        self.hardware_max_speed = setting('hardware_max_joint_speed', 0.25)
-        tolerance = setting('hardware_tracking_tolerance', 0.035)
-        margin = setting('hardware_min_support_margin', 0.005)
-        if (not all(math.isfinite(v) for v in (self.hardware_max_speed, tolerance, margin))
-                or self.hardware_max_speed <= 0 or tolerance <= 0 or margin < 0):
-            raise ValueError('hardware speed/tolerance must be positive and support margin nonnegative')
-        self.pending_direction = None
-        self._last_command = None
-        self._hardware_tick_time = self._now()
-        self._last_hold_log = -math.inf
-        self._hold_reason = ''
-        if self.hardware_feedback:
-            from diagnostic_msgs.msg import DiagnosticArray
-            from rclpy.qos import qos_profile_sensor_data
-            from sensor_msgs.msg import Imu, JointState
-            self.feedback = HardwareFeedback(tolerance, margin)
-            self.create_subscription(JointState, '/joint_states',
-                                     lambda m: self.feedback.joints(m, self._now()), qos_profile_sensor_data)
-            self.create_subscription(Imu, '/imu',
-                                     lambda m: self.feedback.imu(m, self._now()), qos_profile_sensor_data)
-            self.create_subscription(DiagnosticArray, '/diagnostics',
-                                     lambda m: self.feedback.diagnostics(m, self._now()), 10)
-            self.get_logger().info('Hardware feedback enabled: waiting for calibrated stance, '
-                                   'IMU and torque-ON bridge diagnostics. No torque is enabled here.')
-
         self.create_timer(1.0 / PUBLISH_RATE, self._tick)
         self.get_logger().info("Ready.  ros2 topic pub --once /walk_cmd std_msgs/msg/String \"{data: 'start'}\"")
 
     # ---- commands --------------------------------------------------------
-    def _start_walk(self, d):
-        start = np.array([self.keyframes[d]['neutral'][n] for n in JOINT_ORDER])
-        if not np.allclose(start, self.neutral, atol=1e-8):
-            # A stop leaves the feet in their current stride. Restart from it.
-            try:
-                kf, tables = build_tables(d, self.neutral)
-                if SELF_CHECK and not report(d, kf, tables, self.get_logger().info):
-                    raise ValueError('restart gait failed the geometry/balance check')
-            except ValueError as exc:
-                self.state = 'idle'
-                self.get_logger().error(f'Cannot start: {exc}')
-                return
-            self.keyframes[d], self.tables[d] = kf, tables
-        self.direction, self.stop_req = d, False
-        self.state = 'walking'
-        self.t0 = self._now()
-        self._begin('neutral', 'ready')
-        self.get_logger().info(f'Walking {d}.')
-
     def walk_cmd_cb(self, msg):
         cmd = msg.data.strip().lower()
         if cmd in ('start', 'forward', 'backward'):
             d = 'backward' if cmd == 'backward' else 'forward'
-            if getattr(self, 'hardware_feedback', False) and self.state in ('idle', 'waiting'):
-                self.pending_direction = d
-                self.state = 'waiting'
-                self.get_logger().info('Start queued: waiting for hardware readiness and the held/zero stance.')
-                return
             if self.state == 'idle':
-                self._start_walk(d)
+                start = np.array([self.keyframes[d]['neutral'][n] for n in JOINT_ORDER])
+                if not np.allclose(start, self.neutral, atol=1e-8):
+                    # A stop leaves the feet in their current stride. Build the next
+                    # startup from that stance instead of resetting both planted feet.
+                    try:
+                        kf, tables = build_tables(d, self.neutral)
+                        if SELF_CHECK and not report(d, kf, tables, self.get_logger().info):
+                            raise ValueError('restart gait failed the geometry/balance check')
+                    except ValueError as exc:
+                        self.get_logger().error(f'Cannot start: {exc}')
+                        return
+                    self.keyframes[d], self.tables[d] = kf, tables
+                self.direction, self.stop_req = d, False
+                self.state = 'walking'
+                self.t0 = self._now()
+                self._begin('neutral', 'ready')
+                self.get_logger().info(f'Walking {d}.')
             elif d != self.direction:
                 self.get_logger().warn('Already walking the other way: send `stop`, wait until it stands, then retry.')
             else:
                 self.stop_req = False        # cancels a pending stop
         elif cmd == 'stop':
-            if self.state == 'waiting':
-                self.pending_direction = None
-                self.state = 'idle'
-                self.get_logger().info('Queued start cancelled.')
-            elif self.state == 'walking':
+            if self.state == 'walking':
                 self.stop_req = True
                 self.get_logger().info('Stop requested: finishing the step, then standing.')
-        elif cmd == 'status' and getattr(self, 'hardware_feedback', False):
-            self.get_logger().info(f'Hardware state {self.state}, phase {self.cur}->{self.nxt}: '
-                                   f'{self._hold_reason or self.feedback.problem(self._now(), self._last_command) or "feedback ready"}')
         else:
             self.get_logger().warn(f"Unknown command '{cmd}'. Use start / forward / backward / stop.")
 
@@ -667,11 +525,6 @@ class QuasiStaticWalker(Node):
         self.cur, self.nxt = a, b
         self.T = SEGMENT_TIME[b] * TIME_SCALE
         self.table = self.tables[self.direction][(a, b)]
-        if getattr(self, 'hardware_feedback', False):
-            # Stretch the entire phase together: clipping individual joint speeds
-            # would break the stance-foot constraints. Stay below bridge soft-start.
-            slope = float(np.max(np.abs(np.diff(self.table, axis=0)))) * TABLE_SAMPLES
-            self.T = max(self.T, slope / self.hardware_max_speed)
         self.get_logger().info(f'  {a} -> {b}  ({self.T:.1f} s)')
 
     def _advance(self):
@@ -690,68 +543,9 @@ class QuasiStaticWalker(Node):
         else:
             self._begin(arrived, nxt)
 
-    def _hardware_ready(self):
-        """Pause phase time while measurements/servos are not ready; keep publishing.
-
-        Timed dwell remains only a minimum. Liftoff additionally needs measured
-        joint tracking and an IMU-transformed estimate of support margin.
-        """
-        now = self._now()
-        dt = max(0.0, now - self._hardware_tick_time)
-        self._hardware_tick_time = now
-        phase_dt = min(dt, 2.0 / PUBLISH_RATE)
-        if self.state == 'walking':
-            # A delayed control callback must not jump the commanded path ahead.
-            self.t0 += dt - phase_dt
-        target = self.neutral if self.state == 'waiting' else self._last_command
-        reason = self.feedback.problem(now, target)
-        if not reason and self.state == 'walking':
-            if self._dwell_until is not None and now >= self._dwell_until:
-                arrived = self.nxt
-                nxt = 'neutral' if self.stop_req and arrived in SAFE_STOP else NEXT[arrived]
-                if nxt.startswith('lift_'):
-                    reason = self.feedback.problem(now, self.table[-1], STANCE[nxt])
-            elif self._dwell_until is None and now - self.t0 >= self.T:
-                # Do not mark a phase complete until its endpoint was measured.
-                reason = self.feedback.problem(now, self.table[-1])
-        self._hold_reason = reason
-        if reason:
-            if self.state == 'walking':
-                self.t0 += phase_dt
-                if self._dwell_until is not None:
-                    self._dwell_until += dt
-            if self.state in ('walking', 'waiting') and now - self._last_hold_log >= 2.0:
-                self.get_logger().warn(f'Hardware hold: {reason}. Check calibration, load and feedback; '
-                                       'the gait will not advance on time alone.')
-                self._last_hold_log = now
-            # Never interrupt bridge startup positioning or invent a zero-pose
-            # command before observing the robot. Keep the last issued command
-            # alive during a tracking hold so the bridge watchdog does not fire.
-            if self._last_command is not None and not self.feedback.bridge_problem:
-                self._publish(self._last_command)
-            return False
-        if self.state == 'waiting':
-            direction = self.pending_direction
-            self.pending_direction = None
-            self.state = 'idle'
-            self._start_walk(direction)
-        elif self.state == 'idle' and self._last_command is None:
-            # Hold the measured pose until the user requests a start. A robot
-            # far from calibrated zero must be positioned before walking.
-            self._last_command = self.feedback.q.copy()
-        return True
-
-    def _publish(self, pose):
-        msg = Float64MultiArray()
-        msg.data = np.clip(pose, LO, HI).tolist()
-        self.pub.publish(msg)
-
     def _tick(self):
-        hardware = getattr(self, 'hardware_feedback', False)
-        if hardware and not self._hardware_ready():
-            return
         if self.state == 'idle':
-            pose = self._last_command if hardware else self.neutral
+            pose = self.neutral
         elif self._dwell_until is not None:
             pose = self.table[-1]
             if self._now() >= self._dwell_until:
@@ -771,9 +565,9 @@ class QuasiStaticWalker(Node):
                 i = min(int(x), TABLE_SAMPLES - 1)
                 f = x - i
                 pose = self.table[i] * (1.0 - f) + self.table[i + 1] * f
-        if hardware:
-            self._last_command = np.array(pose, copy=True)
-        self._publish(pose)
+        msg = Float64MultiArray()
+        msg.data = np.clip(pose, LO, HI).tolist()
+        self.pub.publish(msg)
 
 
 def main(args=None):
