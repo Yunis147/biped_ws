@@ -7,7 +7,7 @@ changes.
 | package | what it is |
 |---|---|
 | `robotv2_description` | URDF, meshes, Gazebo bringup, RViz config. `use_sim:=true/false` switches whether the Gazebo-only parts (gz_ros2_control, the simulated IMU sensor) are included. |
-| `biped_gait` | `quasi_static_walk` — the open-loop quasi-static walking node. Identical in sim and on hardware. See `docs/walking_math_explained.md` for the full derivation of every constant in it. |
+| `biped_gait` | `quasi_static_walk` — the open-loop quasi-static walking node, shared by simulation and hardware. See [biped_gait/README.md](biped_gait/README.md) for the current foot-position gait and offline checks. |
 | `biped_hardware` | The real robot: `servo_bridge` (12× Waveshare ST3215 over a serial bus), `imu_node` (BNO055), and the `biped_scan` / `biped_set_id` / `biped_calibrate` / `biped_jog` command-line tools. Has a `mock:=true` mode that behaves like real servos at the packet level, with no hardware attached. |
 | `biped_bringup` | One-command launch files: `sim.launch.py`, `hardware.launch.py`. |
 
@@ -126,10 +126,10 @@ ros2 run biped_hardware biped_calibrate show
 ```bash
 
 # Hardware with torque ON at start (robot must be supported and ready)
-ros2 launch biped_hardware hardware.launch.py torque_on_start:=true
+ros2 launch biped_bringup hardware.launch.py startup_position:=true
 
 # Hardware + walking node
-ros2 launch biped_hardware hardware.launch.py torque_on_start:=true walk:=true
+ros2 launch biped_bringup hardware.launch.py startup_position:=true walk:=true
 ```
 
 Once running, send walk commands in a new terminal:
