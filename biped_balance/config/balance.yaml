@@ -1,0 +1,28 @@
+biped_balance:
+  ros__parameters:
+    # Monitoring creates no publisher on the actuator command topic.
+    actuate: false
+    imu_axes_verified: false
+    imu_frame: imu_link
+    imu_source: auto             # auto, quaternion, or raw (gyro + accelerometer)
+    # R_body_from_sensor = Rz(yaw) Ry(pitch) Rx(roll), radians.
+    # Body axes: X forward, Y left, Z up. A frame label does not rotate data.
+    imu_mount_rpy: [0.0, 0.0, 0.0]
+    filter_tau: 0.5
+    record_path: ""             # CSV is created exclusively; existing files are never overwritten
+    record_rate: 10.0
+
+    # Initial experimental gains, NOT tuned on the physical robot.
+    kp_roll: 0.30
+    kp_pitch: 0.30
+    kd_roll: 0.04
+    kd_pitch: 0.04
+    max_correction: 0.0261799388 # 1.5 degrees of commanded torso attitude
+    correction_rate: 0.05       # torso correction rad/s
+    max_joint_speed: 0.25       # complete command, rad/s
+    nominal_joint_speed: 0.12   # posture/transfer path budget, rad/s
+    tracking_tolerance: 0.035
+    fault_tracking_error: 0.15
+    fault_tilt: 0.1745329252     # 10 degrees
+    transfer_distance: 0.015    # small 15 mm pelvis shift; both feet remain down
+    transfer_duration: 6.0
