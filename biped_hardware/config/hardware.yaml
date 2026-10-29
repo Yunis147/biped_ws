@@ -66,6 +66,6 @@ imu:
   enabled: true
   i2c_bus: 7
   address: 0x28
-  mode: imupLus
+  mode: imuplus
   rate_hz: 100
   frame_id: imu_link

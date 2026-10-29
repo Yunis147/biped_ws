@@ -192,7 +192,7 @@ def generate_launch_description():
 
             DeclareLaunchArgument(
                 "torque_on_start",
-                default_value="false",
+                default_value="true",
                 description=(
                     "Enable servo torque immediately at startup. "
                     "Normally leave this false."
@@ -201,7 +201,7 @@ def generate_launch_description():
 
             DeclareLaunchArgument(
                 "startup_position",
-                default_value="false",
+                default_value="true",
                 description=(
                     "Enable torque and move the robot smoothly to the "
                     "calibrated zero/midpoint pose."
