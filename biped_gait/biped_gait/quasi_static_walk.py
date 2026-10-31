@@ -4,7 +4,7 @@ quasi_static_walk.py  —  floor-constrained quasi-static biped gait
 Robot : AsterisCrack BipedRobot V2        Stack : ROS 2 Jazzy + Gazebo Harmonic
 
 WHAT IT DOES
-  Open-loop walking, assuming an upright torso and a level floor. Foot positions
+  Open-loop walking on a level floor with a planned sideways torso lean. Foot positions
   follow smooth Cartesian paths; leg IK solves all six joints, keeping soles
   level and their heading fixed. The walking height leaves knee bend available
   at touchdown. Weight transfer and stopping preserve the planted-foot spacing.
@@ -44,28 +44,30 @@ except ImportError:                      # lets `--check` run without ROS
 # ═══════════════════════════════════════════════════════════════════════
 #  TUNING — metres, radians and seconds. Validated against the rigid robot model.
 # ═══════════════════════════════════════════════════════════════════════
-LEAN_ANGLE    = 0.38     # sets lateral pelvis travel; actual hip roll comes from IK
-BODY_HEIGHT   = 0.265    # torso origin above the soles while walking (neutral: 0.284535)
-SWING_CLEARANCE = 0.012  # lift the entire level sole 12 mm; knee angle comes from IK
-LEG_REACH     = 0.178136 # hip roll -> ankle roll, from the URDF joint offsets
-STEP_PITCH    = {'forward':  0.12, 'backward':  0.08}   # sets half-step distance: LEG_REACH * sin(angle)
-LIFTOFF_SHIFT = {'forward':  0.03, 'backward':  0.025}  # sets small fore/aft pelvis travel
-TIME_SCALE    = 1.5      # scales motion and settling times; cannot fix a static balance error
-PUBLISH_RATE  = 50       # Hz
-TABLE_SAMPLES = 80       # limits foot-position error during runtime joint interpolation
-SELF_CHECK    = True     # run the stability check at start-up
+# These are conservative motion choices, not dimensions copied from the robot.
+CROUCH_DEPTH = 0.040       # 40 mm below the zero-angle standing height
+BODY_ROLL = 0.20           # 11.46 degrees toward the supporting leg
+STEP_LENGTH = {'forward': 0.020, 'backward': 0.016}  # landing ahead of the other foot
+SWING_CLEARANCE = 0.008    # 8 mm, on a flat floor
+MAX_JOINT_SPEED = 0.18     # rad/s, below the bridge's 0.35 rad/s soft-start rate
+MAX_JOINT_ACCEL = 0.30     # rad/s²; used to lengthen each phase if necessary
+MIN_SUPPORT_MARGIN = 0.010  # 10 mm inside the planned supporting area
+TIME_SCALE = 1.5
+PUBLISH_RATE = 50
+TABLE_SAMPLES = 80
+SELF_CHECK = True
 
-# Conservative seconds per segment, indexed by the pose it ends in.
+# Minimum seconds before TIME_SCALE; actual times also obey speed/acceleration.
 SEGMENT_TIME = {
-    'ready': 3.0,                                             # lower into the bent-knee stance
-    'lean_left': 2.5, 'lean_right': 3.5, 'lean_left_cycle': 3.5,   # weight shift (both feet down)
-    'lift_right_1st': 1.5, 'lift_right': 1.5, 'lift_left': 1.5,    # raise the foot
-    'swing_right': 2.0, 'swing_left': 2.0,                         # swing it forward
-    'place_right': 3.5, 'place_left': 3.5,                         # put it down more slowly
-    'neutral': 2.5,                                                # return to standing
+    'ready': 5.0,
+    'lean_left': 4.0, 'lean_right': 5.0, 'lean_left_cycle': 5.0,
+    'lift_right_1st': 2.0, 'lift_right': 2.0, 'lift_left': 2.0,
+    'swing_right': 2.5, 'swing_left': 2.5,
+    'place_right': 3.0, 'place_left': 3.0,
+    'neutral': 5.0,
 }
-DWELL_TIME = {'ready': 0.6, 'lean_left': 0.6, 'lean_right': 0.6,
-              'lean_left_cycle': 0.6, 'place_right': 1.2, 'place_left': 1.2}
+DWELL_TIME = {'ready': 0.8, 'lean_left': 1.0, 'lean_right': 1.0,
+              'lean_left_cycle': 1.0, 'place_right': 1.2, 'place_left': 1.2}
 
 JOINT_ORDER = [
     'r_hip_yaw', 'r_hip_roll_joint', 'r_hip_pitch_joint', 'r_knee_joint',
@@ -74,49 +76,14 @@ JOINT_ORDER = [
     'l_ankle_pitch_joint', 'l_ankle_roll_joint',
 ]
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ROBOT CONSTANTS — copied from robot.urdf.xacro (do not edit)
-#  Each leg lists its joints in KINEMATIC order (hip yaw > hip roll > hip pitch >
-#  knee > ankle roll > ankle pitch).  xyz = joint origin in the parent link frame,
-#  axis = joint axis, lo/hi = joint limits (rad), mass/com = inertial data of the
-#  link that joint moves (kg, m in that link's frame).
-# ═══════════════════════════════════════════════════════════════════════
-LEG = {
- 'r': [
-    dict(name='r_hip_yaw', xyz=[-0.00159, -0.021672, -0.00015], axis=(0, 0, -1), lo=-0.785398, hi=0.785398,
-         mass=0.106649, com=[0.000373, -0.028289, -0.025073]),   # child link: r_hip_upper_link_1
-    dict(name='r_hip_roll_joint', xyz=[0.0191, -0.030829, -0.040776], axis=(-1, 0, 0), lo=-0.436332, hi=1.570796,
-         mass=0.027339, com=[-0.018233, 0.000383, -0.01695]),   # child link: r_hip_lower_link_1
-    dict(name='r_hip_pitch_joint', xyz=[-0.018625, 0.020625, -0.0339], axis=(0, 1, 0), lo=-1.570796, hi=1.570796,
-         mass=0.174697, com=[7e-06, -0.020639, -0.036026]),   # child link: r_thigh_link_1
-    dict(name='r_knee_joint', xyz=[0.0, -0.002, -0.072052], axis=(0, -1, 0), lo=-2.094395, hi=2.094395,
-         mass=0.111030, com=[-5.4e-05, -0.018976, -0.052521]),   # child link: r_calf_link_1
-    dict(name='r_ankle_roll_joint', xyz=[0.018625, -0.019101, -0.072184], axis=(-1, 0, 0), lo=-1.396263, hi=1.396263,
-         mass=0.027339, com=[-0.018233, 0.000383, -0.01695]),   # child link: r_ankle_link_1
-    dict(name='r_ankle_pitch_joint', xyz=[-0.018625, 0.020625, -0.0339], axis=(0, 1, 0), lo=-0.610865, hi=1.48353,
-         mass=0.102795, com=[0.012165, -0.020745, -0.00995]),   # child link: r_foot_link_1
-],
- 'l': [
-    dict(name='l_hip_yaw', xyz=[-0.00159, 0.021672, -0.00015], axis=(0, 0, 1), lo=-0.785398, hi=0.785398,
-         mass=0.106649, com=[0.000373, 0.028289, -0.025073]),   # child link: l_hip_upper_link_1
-    dict(name='l_hip_roll_joint', xyz=[0.0191, 0.030829, -0.040776], axis=(1, 0, 0), lo=-0.436332, hi=1.570796,
-         mass=0.027339, com=[-0.018233, -0.000383, -0.01695]),   # child link: l_hip_lower_link_1
-    dict(name='l_hip_pitch_joint', xyz=[-0.018625, -0.020625, -0.0339], axis=(0, 1, 0), lo=-1.570796, hi=1.570796,
-         mass=0.174697, com=[7e-06, 0.020639, -0.036026]),   # child link: l_thigh_link_1
-    dict(name='l_knee_joint', xyz=[0.0, 0.002, -0.072052], axis=(0, -1, 0), lo=-2.094395, hi=2.094395,
-         mass=0.111030, com=[-5.4e-05, 0.018976, -0.052521]),   # child link: l_calf_link_1
-    dict(name='l_ankle_roll_joint', xyz=[0.018625, 0.019101, -0.072184], axis=(1, 0, 0), lo=-1.396263, hi=1.396263,
-         mass=0.027339, com=[-0.018233, -0.000383, -0.01695]),   # child link: l_ankle_link_1
-    dict(name='l_ankle_pitch_joint', xyz=[-0.018625, -0.020625, -0.0339], axis=(0, 1, 0), lo=-0.610865, hi=1.48353,
-         mass=0.102795, com=[0.012165, 0.020745, -0.00995]),   # child link: l_foot_link_1
-],
-}
-BASE = dict(mass=0.722478, com=[0.003008, -0.002156, 0.031318])          # current robot.urdf.xacro
-# Sole of each foot = rectangle, expressed in the foot link frame (x, y) at height z.
-SOLE = {
- 'r': dict(z=-0.031573, poly=[[-0.028729, -0.0392], [0.061271, -0.0392], [0.061271, -0.003], [-0.028729, -0.003]]),
- 'l': dict(z=-0.031573, poly=[[-0.028729, 0.003], [0.061271, 0.003], [0.061271, 0.0392], [-0.028729, 0.0392]]),
-}
+# Read masses, centres, joint geometry and scaled foot contacts from one source.
+try:
+    from biped_gait.robot_model import load_model, hull as _hull
+except ImportError:  # direct python3 quasi_static_walk.py --check
+    from robot_model import load_model, hull as _hull
+
+LEG, BASE, SOLE, MODEL_PATH = load_model()
+TOTAL_MASS = BASE['mass'] + sum(j['mass'] for side in 'rl' for j in LEG[side])
 
 LIMITS = {j['name']: (j['lo'], j['hi']) for s in 'rl' for j in LEG[s]}
 LO = np.array([LIMITS[n][0] for n in JOINT_ORDER])
@@ -139,7 +106,7 @@ def _rot(axis, a):
 
 
 def _foot_transform(q, side):
-    """Sole-link pose in the upright torso frame."""
+    """Sole-link pose in the torso frame."""
     R, p = np.eye(3), np.zeros(3)
     for j in LEG[side]:
         p += R @ j['xyz']
@@ -180,6 +147,11 @@ def _sole_center(q, side):
     local = np.append(np.mean(SOLE[side]['poly'], axis=0), SOLE[side]['z'])
     return p + R @ local
 
+
+# Zero-angle standing height includes the NEW scaled collision-mesh sole plane.
+ZERO_HEIGHT = -float(np.mean([_sole_center(dict.fromkeys(JOINT_ORDER, 0.0), s)[2] for s in 'rl']))
+BODY_HEIGHT = ZERO_HEIGHT - CROUCH_DEPTH
+CENTER_HEIGHT = ZERO_HEIGHT - 0.020
 
 def _leg_ik(seed, side, target):
     """Solve sole xyz with a level, forward-facing foot on the bent-knee branch.
@@ -234,49 +206,128 @@ def _smoothstep(u):
     return u * u * u * (10.0 + u * (-15.0 + 6.0 * u))
 
 
-def _foot_targets(direction, standing=None):
-    """Cartesian gait with constant walking height and a shared ground plane.
+def _leg_pose_ik(seed, side, target_position, target_rotation, check_limits=True):
+    """Six-joint IK: put the sole at a position AND keep it flat in the world.
 
-    In single support the torso translates relative to the anchored stance foot.
-    In double support both foot targets receive the SAME translation, preserving
-    their world positions and spacing. Touchdown only changes swing-foot z.
+    The body may lean. A foot rotation measured relative to that body therefore
+    need not be identity. The existing upright IK remains available separately.
     """
+    q = dict(seed)
+    names = [j['name'] for j in LEG[side]]
+    if abs(q[names[3]]) < 0.01:
+        q[names[2]], q[names[3]] = -0.04, -0.08
+    for _ in range(70):
+        R, p = np.eye(3), np.zeros(3)
+        origins, axes = [], []
+        for j in LEG[side]:
+            p += R @ j['xyz']
+            origins.append(p.copy())
+            axes.append(R @ np.asarray(j['axis']))
+            R = R @ _rot(j['axis'], q[j['name']])
+        sole = p + R @ np.append(np.mean(SOLE[side]['poly'], axis=0), SOLE[side]['z'])
+        difference = target_rotation @ R.T
+        tilt_error = 0.5 * np.array([difference[2, 1] - difference[1, 2],
+                                     difference[0, 2] - difference[2, 0],
+                                     difference[1, 0] - difference[0, 1]])
+        translation_error = target_position - sole
+        if np.linalg.norm(translation_error) < 2e-8 and np.linalg.norm(tilt_error) < 2e-7:
+            for j in (LEG[side] if check_limits else []):
+                value = q[j['name']]
+                if not j['lo'] + LIMIT_MARGIN <= value <= j['hi'] - LIMIT_MARGIN:
+                    raise ValueError(f"{side} foot target exceeds {j['name']} limit: {value:.4f} rad")
+            return q
+        # A small joint turn moves the sole around that joint's axis. Those six
+        # effects form a table (Jacobian); solve it for the six small angle changes.
+        J = np.vstack((np.column_stack([np.cross(a, sole - o) for a, o in zip(axes, origins)]),
+                       0.1 * np.column_stack(axes)))
+        error = np.concatenate((translation_error, 0.1 * tilt_error))
+        delta = np.linalg.lstsq(J, error, rcond=1e-8)[0]
+        delta *= min(1.0, 0.12 / max(float(np.linalg.norm(delta)), 1e-12))
+        for name, change in zip(names, delta):
+            q[name] += change
+        q[names[3]] = min(q[names[3]], -1e-6)
+    raise ValueError(f'{side} full-pose IK did not converge')
+
+
+def _balanced_pose(feet, desired_com, body, seed, roll):
+    """Solve pelvis x/y so the WHOLE robot's CoM reaches the planned point.
+
+    feet and body are in a shared ground frame. Feet are held fixed during a
+    transfer. The lifted leg and asymmetric inertials remain in the mass sum.
+    """
+    rotation = _rot((1, 0, 0), roll)
+    body, q = np.array(body, dtype=float), dict(seed)
+
+    def evaluate(position, previous):
+        result = dict(previous)
+        for side in 'rl':
+            result = _leg_pose_ik(result, side, rotation.T @ (feet[side] - position), rotation.T, check_limits=False)
+        com, _ = _com_and_feet(result)
+        return result, (rotation @ com + position)[:2] - desired_com
+
+    for _ in range(25):
+        q, error = evaluate(body, q)
+        if np.linalg.norm(error) < 1e-7:
+            for side in 'rl':
+                for j in LEG[side]:
+                    if not j['lo'] + LIMIT_MARGIN <= q[j['name']] <= j['hi'] - LIMIT_MARGIN:
+                        raise ValueError(f"mass-balanced pose exceeds {j['name']} limit: {q[j['name']]:.4f} rad")
+            return q, body
+        response = np.zeros((2, 2))
+        for axis in range(2):
+            shifted = body.copy()
+            shifted[axis] += 1e-5
+            _, shifted_error = evaluate(shifted, q)
+            response[:, axis] = (shifted_error - error) / 1e-5
+        change = np.linalg.solve(response, -error)
+        change *= min(1.0, 0.006 / max(float(np.linalg.norm(change)), 1e-12))
+        body[:2] += change
+    raise ValueError('whole-robot mass balance solve did not converge')
+
+
+def _plan(direction, standing=None):
+    if direction not in STEP_LENGTH:
+        raise ValueError(f'unknown walking direction: {direction}')
     neutral = dict(zip(JOINT_ORDER, np.zeros(12) if standing is None else standing))
-    initial = {s: _sole_center(neutral, s) for s in 'rl'}
-    zero = {n: 0.0 for n in JOINT_ORDER}
-    nominal_x = _sole_center(zero, 'r')[0]
-    middle = (initial['r'] + initial['l']) * 0.5
-    ready = {s: initial[s] - np.array([middle[0] - nominal_x, middle[1], 0.0])
-             for s in 'rl'}
+    if not all(np.isfinite(list(neutral.values()))):
+        raise ValueError('invalid starting pose')
+    feet = {s: _sole_center(neutral, s) for s in 'rl'}
+    height = -float(np.mean([f[2] for f in feet.values()]))
+    if any(np.linalg.norm(_foot_transform(neutral, s)[0] - np.eye(3)) > 1e-4 for s in 'rl'):
+        raise ValueError('start requires an upright, level-foot standing pose')
+    if abs(feet['r'][2] - feet['l'][2]) > 1e-5:
+        raise ValueError('starting soles are not on the same ground plane')
     for side in 'rl':
-        ready[side][2] = -BODY_HEIGHT
-    sign = 1.0 if direction == 'forward' else -1.0
-    half_step = sign * LEG_REACH * math.sin(STEP_PITCH[direction])
-    shift = LEG_REACH * math.sin(LEAN_ANGLE)
-    advance = sign * LEG_REACH * math.sin(LIFTOFF_SHIFT[direction])
+        feet[side] = feet[side] + [0, 0, height]
+    middle = (feet['r'][:2] + feet['l'][:2]) * 0.5
+    initial_com, _ = _com_and_feet(neutral)
+    step = STEP_LENGTH[direction] * (1 if direction == 'forward' else -1)
+    states = {}
 
-    def pose(lean, xr, xl, lifted=None, initial_stride=False):
-        out = {s: ready[s].copy() for s in 'rl'}
-        for side, x in (('r', xr), ('l', xl)):
-            out[side][0] = (ready[side][0] if initial_stride else nominal_x) + x
-            out[side][1] -= lean
-            out[side][2] += SWING_CLEARANCE if side == lifted else 0.0
-        return out
+    def add(name, com, roll=0.0, z=BODY_HEIGHT):
+        states[name] = dict(feet={s: f.copy() for s, f in feet.items()},
+                            com=np.array(com).copy(), roll=roll, height=z)
 
-    return neutral, {
-        'neutral': initial,
-        'ready': ready,
-        'lean_left': pose(shift, 0, 0, initial_stride=True),
-        'lift_right_1st': pose(shift, -advance, -advance, 'r', initial_stride=True),
-        'swing_right': pose(shift, half_step, -half_step, 'r'),
-        'place_right': pose(shift, half_step, -half_step),
-        'lean_right': pose(-shift, half_step, -half_step),
-        'lift_left': pose(-shift, half_step - advance, -half_step - advance, 'l'),
-        'swing_left': pose(-shift, -half_step, half_step, 'l'),
-        'place_left': pose(-shift, -half_step, half_step),
-        'lean_left_cycle': pose(shift, -half_step, half_step),
-        'lift_right': pose(shift, -half_step - advance, half_step - advance, 'r'),
-    }
+    add('neutral', initial_com[:2], z=height)
+    add('ready', middle, z=CENTER_HEIGHT)
+    add('lean_left', feet['l'][:2], -BODY_ROLL)
+    feet['r'][2] = SWING_CLEARANCE
+    add('lift_right_1st', feet['l'][:2], -BODY_ROLL)
+    feet['r'][0] = feet['l'][0] + step
+    add('swing_right', feet['l'][:2], -BODY_ROLL)
+    feet['r'][2] = 0.0
+    add('place_right', feet['l'][:2], -BODY_ROLL)
+    add('lean_right', feet['r'][:2], BODY_ROLL)
+    feet['l'][2] = SWING_CLEARANCE
+    add('lift_left', feet['r'][:2], BODY_ROLL)
+    feet['l'][0] = feet['r'][0] + step
+    add('swing_left', feet['r'][:2], BODY_ROLL)
+    feet['l'][2] = 0.0
+    add('place_left', feet['r'][:2], BODY_ROLL)
+    add('lean_left_cycle', feet['l'][:2], -BODY_ROLL)
+    feet['r'][2] = SWING_CLEARANCE
+    add('lift_right', feet['l'][:2], -BODY_ROLL)
+    return neutral, states
 
 
 NEXT = {
@@ -289,47 +340,130 @@ NEXT = {
 }
 SAFE_STOP = ('ready', 'lean_left', 'place_right', 'lean_right', 'place_left', 'lean_left_cycle')
 SEGMENTS = list(NEXT.items()) + [(k, 'neutral') for k in SAFE_STOP]
-# Intended loaded leg for each single-support segment, including its boundaries.
 STANCE = {'lift_right_1st': 'l', 'lift_right': 'l', 'swing_right': 'l', 'place_right': 'l',
           'lift_left': 'r', 'swing_left': 'r', 'place_left': 'r'}
 
 
+def _height_between(start, end, u):
+    height = start['height'] + u * (end['height'] - start['height'])
+    if start['roll'] * end['roll'] < 0:
+        # Raise the pelvis in the middle of a transfer, where both legs are
+        # under it. Lower again for the longer sideways reach in single support.
+        height += (CENTER_HEIGHT - BODY_HEIGHT) * 16 * u*u * (1-u)*(1-u)
+    return height
+
+
+def _plan_keyframes(direction, standing=None):
+    q, states = _plan(direction, standing)
+    frames = {'neutral': dict(q)}
+    bodies = {'neutral': np.array([0., 0., states['neutral']['height']])}
+    body = bodies['neutral'].copy()
+    previous = states['neutral']
+    for name, state in list(states.items())[1:]:
+        # Intermediate desired points avoid jumping straight across a joint limit
+        # during Newton iterations when computing an isolated keyframe.
+        for u in np.linspace(0, 1, 21)[1:]:
+            feet = {s: previous['feet'][s] + u * (state['feet'][s] - previous['feet'][s]) for s in 'rl'}
+            com = previous['com'] + u * (state['com'] - previous['com'])
+            body[2] = _height_between(previous, state, u)
+            roll = previous['roll'] + u * (state['roll'] - previous['roll'])
+            try:
+                q, body = _balanced_pose(feet, com, body, q, roll)
+            except ValueError as exc:
+                raise ValueError(f'{name} at {u:.3f}: {exc}') from exc
+        frames[name], bodies[name] = dict(q), body.copy()
+        previous = state
+    return frames, bodies, states
+
+
 def build_keyframes(direction, standing=None):
-    q, targets = _foot_targets(direction, standing)
-    frames = {'neutral': q}
-    for name, feet in targets.items():
-        if name != 'neutral':
-            q = _pose_for_feet(feet, q)
-            frames[name] = q
-    return frames
+    return _plan_keyframes(direction, standing)[0]
+
+
+def _foot_targets(direction, standing=None):
+    """Body-frame targets, retained for existing read-only standing experiments."""
+    frames = build_keyframes(direction, standing)
+    return frames['neutral'], {name: {s: _sole_center(q, s) for s in 'rl'}
+                               for name, q in frames.items()}
 
 
 def build_tables(direction, standing=None):
-    """Solve every phase in foot space, including startup, transfer and stopping."""
-    kf = build_keyframes(direction, standing)
-    _, targets = _foot_targets(direction, standing)
+    """Solve every sample for foot contact, torso lean AND whole-robot balance."""
+    kf, bodies, states = _plan_keyframes(direction, standing)
     tables = {}
-    ready_midpoint = (targets['ready']['r'] + targets['ready']['l']) * 0.5
     for a, b in SEGMENTS:
-        start = targets[a]
+        start = states[a]
         if b == 'neutral':
-            # Stop in the current stride: centre the pelvis without dragging the feet
-            # together or extending the legs. The node holds this exact final pose.
-            middle = (start['r'] + start['l']) * 0.5
-            offset = np.array([middle[0] - ready_midpoint[0], middle[1], 0.0])
-            end = {s: start[s] - offset for s in 'rl'}
+            end = dict(feet=start['feet'], com=(start['feet']['r'][:2] + start['feet']['l'][:2]) * 0.5,
+                       roll=0.0, height=CENTER_HEIGHT)
         else:
-            end = targets[b]
-        rows, previous = [], kf[a]
+            end = states[b]
+            if (a, b) == ('lift_right', 'swing_right'):
+                # The next stride is translated in the world. Reuse its joint
+                # pattern while keeping the current left support foot anchored.
+                offset = start['feet']['l'] - end['feet']['l']
+                end = dict(end, feet={s: f + offset for s, f in end['feet'].items()},
+                           com=end['com'] + offset[:2])
+        rows, previous, body = [], kf[a], bodies[a].copy()
         for k in range(TABLE_SAMPLES + 1):
             u = _smoothstep(k / TABLE_SAMPLES)
-            feet = {s: start[s] + (end[s] - start[s]) * u for s in 'rl'}
-            q = _pose_for_feet(feet, previous)
-            previous = q
-            rows.append([q[n] for n in JOINT_ORDER])
+            feet = {s: start['feet'][s] + u * (end['feet'][s] - start['feet'][s]) for s in 'rl'}
+            com = start['com'] + u * (end['com'] - start['com'])
+            body[2] = _height_between(start, end, u)
+            roll = start['roll'] + u * (end['roll'] - start['roll'])
+            if k:
+                try:
+                    previous, body = _balanced_pose(feet, com, body, previous, roll)
+                except ValueError as exc:
+                    raise ValueError(f'{a} -> {b}, sample {k}: {exc}') from exc
+            rows.append([previous[n] for n in JOINT_ORDER])
         tables[(a, b)] = np.array(rows)
+        # Use one canonical joint vector at shared phase boundaries. Independent
+        # solves agree to tiny tolerances, but even that numerical seam is avoidable.
+        if b != 'neutral':
+            tables[(a, b)][-1] = [kf[b][n] for n in JOINT_ORDER]
     return kf, tables
 
+
+def _interpolation_coefficients(table):
+    slopes = np.zeros_like(table)
+    slopes[1:-1] = (table[2:] - table[:-2]) * 0.5
+    first, last, m0, m1 = table[:-1], table[1:], slopes[:-1], slopes[1:]
+    return 2*first - 2*last + m0 + m1, -3*first + 3*last - 2*m0 - m1, m0, first
+
+
+def table_pose(table, fraction):
+    """Cubic interpolation: continuous joint velocity and stopped phase ends."""
+    if fraction <= 0:
+        return table[0].copy()
+    if fraction >= 1:
+        return table[-1].copy()
+    coordinate = fraction * (len(table) - 1)
+    index = min(int(coordinate), len(table) - 2)
+    u = coordinate - index
+    # Compute just this interval; no allocation of a full table at 50 Hz.
+    first, last = table[index], table[index + 1]
+    m0 = (last - table[index - 1]) * .5 if index else np.zeros(12)
+    m1 = (table[index + 2] - first) * .5 if index + 2 < len(table) else np.zeros(12)
+    a, b = 2*first - 2*last + m0 + m1, -3*first + 3*last - 2*m0 - m1
+    return ((a*u + b)*u + m0)*u + first
+
+
+def _motion_bounds(table):
+    a, b, c, _ = _interpolation_coefficients(table)
+    # Exact extrema of each cubic's first and second derivatives.
+    u = np.clip(np.divide(-b, 3*a, out=np.zeros_like(a), where=np.abs(a) > 1e-15), 0, 1)
+    speed = max(float(np.max(np.abs(c))), float(np.max(np.abs(3*a + 2*b + c))),
+                float(np.max(np.abs(3*a*u*u + 2*b*u + c)))) * (len(table) - 1)
+    acceleration = max(float(np.max(np.abs(2*b))), float(np.max(np.abs(6*a + 2*b)))) * (len(table) - 1)**2
+    return speed, acceleration
+
+
+def segment_duration(destination, table):
+    """Lengthen slow phases to respect all joints; never clip individual angles."""
+    speed, acceleration = _motion_bounds(table)
+    return max(SEGMENT_TIME[destination] * TIME_SCALE,
+               speed / MAX_JOINT_SPEED, math.sqrt(acceleration / MAX_JOINT_ACCEL))
 
 # ═══════════════════════════════════════════════════════════════════════
 #  MATH 2 — centre of mass and the support polygon (used for the self-check)
@@ -355,24 +489,6 @@ def _com_and_feet(q):
     return com / mtot, feet
 
 
-def _hull(P):
-    P = sorted(set(map(tuple, np.round(P, 6))))
-    if len(P) < 3:
-        return P
-
-    def cr(o, a, b):
-        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-    lo, up = [], []
-    for p in P:
-        while len(lo) >= 2 and cr(lo[-2], lo[-1], p) <= 0:
-            lo.pop()
-        lo.append(p)
-    for p in reversed(P):
-        while len(up) >= 2 and cr(up[-2], up[-1], p) <= 0:
-            up.pop()
-        up.append(p)
-    return lo[:-1] + up[:-1]
-
 
 def _margin(poly, pt):
     """Signed distance from point to a convex polygon: + inside, - outside."""
@@ -389,52 +505,70 @@ def _margin(poly, pt):
     return m
 
 
-def gait_metrics(kf, tables):
-    """Check intended contacts, including double support and runtime interpolation.
+def _ground_frame(q, reference='l'):
+    """Rotate body-frame values into axes parallel to the flat supporting sole."""
+    rotation = _foot_transform(q, reference)[0].T
+    com, feet = _com_and_feet(q)
+    return rotation @ com, {s: f @ rotation.T for s, f in feet.items()}, rotation
 
-    Do not infer the supporting leg from whichever foot happens to be lowest:
-    that would hide a swing-foot penetration by treating it as the new support.
+
+def gait_metrics(kf, tables):
+    """Check the full interpolated motion, using the INTENDED support foot.
+
+    Rotating into the supporting sole's frame accounts for the planned body
+    roll; body-frame vertical is not gravity vertical when the torso leans.
     """
     worst, where = math.inf, None
     ground_error = spacing_error = rotation_error = 0.0
-    joint_error = 0.0
+    joint_error = max_speed = max_acceleration = com_error = 0.0
+    min_knee_bend = math.inf
+    max_body_roll = 0.0
     for seg, table in tables.items():
         a, b = seg
         loaded = STANCE.get(b)
-        _, first_feet = _com_and_feet(dict(zip(JOINT_ORDER, table[0])))
+        reference = loaded or 'l'
+        _, first_feet, _ = _ground_frame(dict(zip(JOINT_ORDER, table[0])), reference)
         spacing = first_feet['r'].mean(axis=0) - first_feet['l'].mean(axis=0)
-        # The timer interpolates joint values between rows; check inside each interval too.
-        samples = [row * (1.0 - u) + nxt * u
-                   for row, nxt in zip(table[:-1], table[1:]) for u in (0.0, 0.5)]
-        samples.append(table[-1])
-        for row in samples:
+        duration = segment_duration(b, table)
+        speed, acceleration = _motion_bounds(table)
+        max_speed = max(max_speed, speed / duration)
+        max_acceleration = max(max_acceleration, acceleration / duration**2)
+        # Check quarter points as well as rows, using the SAME cubic as the timer.
+        for fraction in np.linspace(0, 1, TABLE_SAMPLES * 4 + 1):
+            row = table_pose(table, fraction)
             q = dict(zip(JOINT_ORDER, row))
-            com, feet = _com_and_feet(q)
+            com, feet, rotation = _ground_frame(q, reference)
             down = [loaded] if loaded else list('rl')
             points = np.concatenate([feet[s] for s in down])
             m = _margin(_hull(points[:, :2]), com[:2]) * 1000.0
             if m < worst:
                 worst, where = m, seg
-            if a == 'neutral':  # initial lowering: the pelvis changes height
-                error = float(np.ptp(points[:, 2]))
-            else:
-                error = float(np.max(np.abs(points[:, 2] + BODY_HEIGHT)))
-                error = max(error, max(0.0, -BODY_HEIGHT - min(f[:, 2].min() for f in feet.values())))
+            ground = float(points[:, 2].mean())
+            error = max(float(np.ptp(points[:, 2])),
+                        max(0.0, ground - min(f[:, 2].min() for f in feet.values())))
             ground_error = max(ground_error, error)
             if not loaded:
                 current = feet['r'].mean(axis=0) - feet['l'].mean(axis=0)
                 spacing_error = max(spacing_error, float(np.linalg.norm(current - spacing)))
+            else:
+                com_error = max(com_error, float(np.linalg.norm(com[:2] - feet[loaded][:, :2].mean(axis=0))))
             for side in 'rl':
                 R, _ = _foot_transform(q, side)
-                rotation_error = max(rotation_error, float(np.linalg.norm(R - np.eye(3)) / math.sqrt(2)))
+                rotation_error = max(rotation_error, float(np.linalg.norm(rotation @ R - np.eye(3)) / math.sqrt(2)))
+                if a != 'neutral':
+                    min_knee_bend = min(min_knee_bend, -q[f'{side}_knee_joint'])
+            max_body_roll = max(max_body_roll, abs(math.atan2(rotation[2, 1], rotation[2, 2])))
             joint_error = max(joint_error, float(np.max(LO + LIMIT_MARGIN - row)),
                               float(np.max(row - HI + LIMIT_MARGIN)))
-    clearance = min((_sole_center(kf[name], swing)[2] - _sole_center(kf[name], stance)[2]) * 1000
-                    for name, swing, stance in (('swing_right', 'r', 'l'), ('swing_left', 'l', 'r')))
+    clearance = math.inf
+    for name, swing, stance in (('swing_right', 'r', 'l'), ('swing_left', 'l', 'r')):
+        _, feet, _ = _ground_frame(kf[name], stance)
+        clearance = min(clearance, float(feet[swing][:, 2].min() - feet[stance][:, 2].max()) * 1000)
     return dict(margin=worst, where=where, clearance=clearance,
                 ground_error=ground_error * 1000, spacing_error=spacing_error * 1000,
-                rotation_error=rotation_error, joint_error=joint_error)
-
+                rotation_error=rotation_error, joint_error=joint_error,
+                max_speed=max_speed, max_acceleration=max_acceleration,
+                com_error=com_error * 1000, min_knee_bend=min_knee_bend, max_body_roll=max_body_roll)
 
 def check_gait(direction, kf, tables):
     """Compatibility helper: return worst static margin, segment and clearance (mm)."""
@@ -444,11 +578,17 @@ def check_gait(direction, kf, tables):
 
 def report(direction, kf, tables, log):
     m = gait_metrics(kf, tables)
-    ok = (m['margin'] >= 3.0 and m['clearance'] >= 10.0 and m['ground_error'] <= 0.2
-          and m['spacing_error'] <= 0.2 and m['rotation_error'] <= 0.002 and m['joint_error'] <= 1e-8)
+    ok = (m['margin'] >= MIN_SUPPORT_MARGIN * 1000
+          and m['clearance'] >= SWING_CLEARANCE * 1000 - 0.1 and m['ground_error'] <= 0.2
+          and m['spacing_error'] <= 0.2 and m['rotation_error'] <= 0.002 and m['joint_error'] <= 1e-8
+          and m['max_speed'] <= MAX_JOINT_SPEED + 1e-9
+          and m['max_acceleration'] <= MAX_JOINT_ACCEL + 1e-9
+          and m['com_error'] <= 0.2 and m['min_knee_bend'] >= 0.12)
     log(f"[check] {direction:8s}: static margin {m['margin']:.1f} mm "
         f"(at {m['where']}), clearance {m['clearance']:.1f} mm, "
-        f"floor error {m['ground_error']:.3f} mm, foot-spacing error {m['spacing_error']:.3f} mm "
+        f"floor error {m['ground_error']:.3f} mm, foot-spacing error {m['spacing_error']:.3f} mm, "
+        f"CoM centring error {m['com_error']:.3f} mm, peak speed {m['max_speed']:.3f} rad/s, "
+        f"peak acceleration {m['max_acceleration']:.3f} rad/s² "
         f"{'OK' if ok else 'FAILED: revise the foot targets or robot model before walking'}")
     return ok
 
@@ -463,6 +603,7 @@ class QuasiStaticWalker(Node):
         self.pub = self.create_publisher(Float64MultiArray, '/position_controller/commands', 10)
         self.create_subscription(String, '/walk_cmd', self.walk_cmd_cb, 10)
 
+        self.get_logger().info(f'Model: {MODEL_PATH}; mass {TOTAL_MASS:.6f} kg, zero height {ZERO_HEIGHT*1000:.2f} mm')
         self.get_logger().info('Pre-computing gait tables ...')
         self.keyframes, self.tables = {}, {}
         for d in ('forward', 'backward'):
@@ -523,7 +664,7 @@ class QuasiStaticWalker(Node):
 
     def _begin(self, a, b):
         self.cur, self.nxt = a, b
-        self.T = SEGMENT_TIME[b] * TIME_SCALE
+        self.T = segment_duration(b, self.tables[self.direction][(a, b)])
         self.table = self.tables[self.direction][(a, b)]
         self.get_logger().info(f'  {a} -> {b}  ({self.T:.1f} s)')
 
@@ -561,17 +702,16 @@ class QuasiStaticWalker(Node):
                 pose = self.table[-1]
                 self._advance()
             else:
-                x = min(max(t, 0.0), 1.0) * TABLE_SAMPLES
-                i = min(int(x), TABLE_SAMPLES - 1)
-                f = x - i
-                pose = self.table[i] * (1.0 - f) + self.table[i + 1] * f
+                pose = table_pose(self.table, t)
         msg = Float64MultiArray()
-        msg.data = np.clip(pose, LO, HI).tolist()
+        msg.data = pose.tolist()  # already checked; clipping would spoil coordinated feet
         self.pub.publish(msg)
 
 
 def main(args=None):
     if '--check' in sys.argv:                  # offline self-check, no ROS needed
+        print(f'Model: {MODEL_PATH}\nMass: {TOTAL_MASS:.6f} kg; zero height: {ZERO_HEIGHT*1000:.3f} mm; '
+              f'centre height: {CENTER_HEIGHT*1000:.3f} mm; single-support height: {BODY_HEIGHT*1000:.3f} mm')
         ok = True
         for d in ('forward', 'backward'):
             kf, tab = build_tables(d)

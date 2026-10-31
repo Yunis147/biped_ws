@@ -4,7 +4,9 @@ Run: python3 -B -m unittest discover -s biped_gait/test -v
 """
 import importlib.util
 from pathlib import Path
+import struct
 import sys
+import tempfile
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -14,6 +16,8 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'biped_gait'))
+from biped_gait.robot_model import load_model
 
 
 class FakeNode:
@@ -90,10 +94,9 @@ class WalkingTests(unittest.TestCase):
             T = transforms[f'{side}_foot_link_1']
             local = np.array([[x, y, gait.SOLE[side]['z'], 1] for x, y in gait.SOLE[side]['poly']])
             feet[side] = (T @ local.T).T[:, :3]
-            np.testing.assert_allclose(T[:3, :3], np.eye(3), atol=0.00015)
-        return com / total, feet
+        return com / total, feet, {s: transforms[f'{s}_foot_link_1'][:3, :3] for s in 'rl'}
 
-    def test_copied_model_matches_current_urdf(self):
+    def test_loaded_model_matches_current_urdf(self):
         total = gait.BASE['mass']
         self.assertEqual(total, float(self.robot.find("link[@name='base_link']/inertial/mass").get('value')))
         for side in 'rl':
@@ -107,34 +110,81 @@ class WalkingTests(unittest.TestCase):
                 np.testing.assert_allclose(data['axis'], np.fromstring(joint.find('axis').get('xyz'), sep=' '))
                 self.assertEqual((data['lo'], data['hi']), tuple(float(joint.find('limit').get(k)) for k in ('lower', 'upper')))
                 total += data['mass']
-        self.assertAlmostEqual(total, 1.822176, places=6)
+        self.assertAlmostEqual(total, 1.291500, places=6)
+
+    def test_contact_area_comes_from_scaled_bottom_vertices(self):
+        # Parse STL triangles independently, including mesh scale AND offset.
+        for side in 'rl':
+            collision = self.robot.find(f"link[@name='{side}_foot_link_1']/collision")
+            mesh = collision.find('geometry/mesh')
+            path = ROOT / mesh.get('filename').removeprefix('package://')
+            data = path.read_bytes()
+            count = struct.unpack_from('<I', data, 80)[0]
+            vertices = np.array([struct.unpack_from('<9f', data, 84 + i*50 + 12)
+                                 for i in range(count)]).reshape(-1, 3)
+            vertices *= np.fromstring(mesh.get('scale'), sep=' ')
+            vertices += np.fromstring(collision.find('origin').get('xyz'), sep=' ')
+            z = vertices[:, 2].min()
+            bottom = vertices[np.abs(vertices[:, 2] - z) < 1e-7]
+            expected = sorted(map(tuple, np.unique(bottom[:, :2], axis=0)))
+            self.assertEqual(sorted(map(tuple, gait.SOLE[side]['poly'])), expected)
+            self.assertAlmostEqual(gait.SOLE[side]['z'], z, places=12)
+        self.assertAlmostEqual(gait.ZERO_HEIGHT, .2738826747, places=9)
+        self.assertAlmostEqual(gait.BODY_HEIGHT, gait.ZERO_HEIGHT - .040)
+
+    def test_future_mass_and_mesh_edits_are_loaded_without_copied_constants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            (package / 'urdf').mkdir()
+            (package / 'meshes').symlink_to(ROOT / 'robotv2_description/meshes', target_is_directory=True)
+            robot = ET.fromstring(ET.tostring(self.robot))
+            robot.find("link[@name='base_link']/inertial/mass").set('value', '0.425100')
+            mesh = robot.find("link[@name='r_foot_link_1']/collision/geometry/mesh")
+            scale = np.fromstring(mesh.get('scale'), sep=' ')
+            scale[2] *= 1.01
+            mesh.set('scale', ' '.join(map(str, scale)))
+            path = package / 'urdf/robot.urdf.xacro'
+            ET.ElementTree(robot).write(path)
+            legs, base, soles, _ = load_model(package)
+            self.assertAlmostEqual(base['mass'] + sum(j['mass'] for s in 'rl' for j in legs[s]), 1.3915)
+            self.assertNotAlmostEqual(soles['r']['z'], gait.SOLE['r']['z'], places=5)
+            # A changed mechanism must fail clearly, rather than use old IK assumptions.
+            robot.find("joint[@name='l_knee_joint']/axis").set('xyz', '0 1 0')
+            ET.ElementTree(robot).write(path)
+            with self.assertRaisesRegex(ValueError, 'joint axis changed'):
+                load_model(package)
 
     def test_floor_and_balance_with_independent_urdf_model(self):
         for direction, (kf, tables) in self.gaits.items():
             for seg, table in tables.items():
                 loaded = gait.STANCE.get(seg[1])
                 spacing = None
-                for row, nxt in zip(table[:-1], table[1:]):
+                for index in range(len(table) - 1):
                     # Include the values actually interpolated by the publisher.
                     for fraction in (0.0, 0.5):
-                        pose = row * (1 - fraction) + nxt * fraction
-                        com, feet = self.independent_fk(pose)
+                        pose = gait.table_pose(table, (index + fraction) / gait.TABLE_SAMPLES)
+                        com, feet, rotations = self.independent_fk(pose)
                         model_com, model_feet = gait._com_and_feet(dict(zip(gait.JOINT_ORDER, pose)))
                         np.testing.assert_allclose(com, model_com, atol=1e-12)
                         for side in 'rl':
                             np.testing.assert_allclose(feet[side], model_feet[side], atol=1e-12)
+                        rotation = rotations[loaded or 'l'].T
+                        com = rotation @ com
+                        feet = {s: f @ rotation.T for s, f in feet.items()}
+                        for R in rotations.values():
+                            np.testing.assert_allclose(rotation @ R, np.eye(3), atol=2e-6)
+                        if loaded:
+                            np.testing.assert_allclose(com[:2], feet[loaded].mean(0)[:2], atol=2e-6)
                         points = np.concatenate([feet[s] for s in ([loaded] if loaded else 'rl')])
                         # Independently test every support-polygon edge.
                         poly = gait._hull(points[:, :2])
                         for i, a in enumerate(poly):
                             edge = np.array(poly[(i + 1) % len(poly)]) - a
                             distance = np.dot(com[:2] - a, [-edge[1], edge[0]]) / np.linalg.norm(edge)
-                            self.assertGreater(distance, .003, (direction, seg))
-                        if seg[0] != 'neutral':
-                            np.testing.assert_allclose(points[:, 2], -gait.BODY_HEIGHT, atol=.00002)
-                            self.assertGreaterEqual(min(f[:, 2].min() for f in feet.values()), -gait.BODY_HEIGHT - .00002)
-                        else:
-                            self.assertLess(np.ptp(points[:, 2]), .00002)
+                            self.assertGreater(distance, .010, (direction, seg))
+                        ground = points[:, 2].mean()
+                        self.assertLess(np.ptp(points[:, 2]), .000002)
+                        self.assertGreaterEqual(min(f[:, 2].min() for f in feet.values()), ground - .000002)
                         if not loaded:
                             current = feet['r'].mean(0) - feet['l'].mean(0)
                             if spacing is None:
@@ -147,13 +197,19 @@ class WalkingTests(unittest.TestCase):
             for swing in ('right', 'left'):
                 side = swing[0]
                 table = tables[(f'swing_{swing}', f'place_{swing}')]
-                positions = np.array([gait._sole_center(dict(zip(gait.JOINT_ORDER, row)), side) for row in table])
+                stance = 'l' if side == 'r' else 'r'
+                positions = []
+                for row in table:
+                    _, feet, rotations = self.independent_fk(row)
+                    relative = feet[side].mean(0) - feet[stance].mean(0)
+                    positions.append(rotations[stance].T @ relative)
+                positions = np.array(positions)
                 np.testing.assert_allclose(positions[:, :2], np.broadcast_to(positions[0, :2], positions[:, :2].shape), atol=1e-7)
                 self.assertTrue(np.all(np.diff(positions[:, 2]) <= 1e-7))
-                self.assertAlmostEqual(positions[-1, 2], -gait.BODY_HEIGHT, places=6)
-                self.assertAlmostEqual(positions[0, 2] - positions[-1, 2], .012, places=6)
+                self.assertAlmostEqual(positions[-1, 2], 0., places=6)
+                self.assertAlmostEqual(positions[0, 2] - positions[-1, 2], .008, places=6)
                 for leg in 'rl':
-                    self.assertLess(kf[f'place_{swing}'][f'{leg}_knee_joint'], -.2)
+                    self.assertLess(kf[f'place_{swing}'][f'{leg}_knee_joint'], -.12)
 
     def test_limits_direction_and_continuity_at_every_phase(self):
         for direction, (kf, tables) in self.gaits.items():
@@ -169,8 +225,9 @@ class WalkingTests(unittest.TestCase):
             sign = 1 if direction == 'forward' else -1
             for phase, leading in [('place_right', 'r'), ('place_left', 'l')]:
                 trailing = 'l' if leading == 'r' else 'r'
-                delta = gait._sole_center(kf[phase], leading)[0] - gait._sole_center(kf[phase], trailing)[0]
-                self.assertGreater(delta * sign, .025)
+                _, feet, rotations = self.independent_fk(np.array([kf[phase][n] for n in gait.JOINT_ORDER]))
+                delta = rotations[leading].T @ (feet[leading].mean(0) - feet[trailing].mean(0))
+                self.assertAlmostEqual(delta[0] * sign, gait.STEP_LENGTH[direction], places=6)
 
     def test_invalid_targets_and_double_support_errors_are_rejected(self):
         seed = self.gaits['forward'][0]['ready']
@@ -180,6 +237,34 @@ class WalkingTests(unittest.TestCase):
         tables = {key: value.copy() for key, value in original.items()}
         tables[('place_right', 'lean_right')][40, gait.JOINT_ORDER.index('r_knee_joint')] -= .1
         self.assertFalse(gait.report('forward', kf, tables, lambda msg: None))
+
+    def test_planned_body_lean_and_motion_limits(self):
+        for direction, (kf, tables) in self.gaits.items():
+            for name, sign in (('lean_left', -1), ('lean_right', 1)):
+                _, _, rotations = self.independent_fk([kf[name][n] for n in gait.JOINT_ORDER])
+                body = rotations['l'].T
+                roll = np.arctan2(body[2, 1], body[2, 2])
+                self.assertAlmostEqual(roll, sign * gait.BODY_ROLL, places=6)
+            for (a, b), table in tables.items():
+                duration = gait.segment_duration(b, table)
+                values = np.array([gait.table_pose(table, u) for u in np.linspace(0, 1, 2001)])
+                dt = duration / 2000
+                self.assertLessEqual(np.max(np.abs(np.diff(values, axis=0))) / dt,
+                                     gait.MAX_JOINT_SPEED + 1e-5)
+                self.assertLessEqual(np.max(np.abs(np.diff(values, n=2, axis=0))) / dt**2,
+                                     gait.MAX_JOINT_ACCEL + 1e-5)
+                # Each phase really starts/stops; there is no jump in velocity at a dwell.
+                for edge in (0., 1.):
+                    u = edge + (1e-6 if edge == 0 else -1e-6)
+                    speed = np.max(np.abs(gait.table_pose(table, u) - gait.table_pose(table, edge))) / (duration * 1e-6)
+                    self.assertLess(speed, .0001)
+
+    def test_unreachable_settings_fail_before_command_generation(self):
+        with patch.object(gait, 'BODY_ROLL', 0.):
+            with self.assertRaises(ValueError):
+                gait.build_tables('forward')
+        with self.assertRaises(ValueError):
+            gait.build_tables('sideways')
 
     def make_node(self):
         node = gait.QuasiStaticWalker.__new__(gait.QuasiStaticWalker)
