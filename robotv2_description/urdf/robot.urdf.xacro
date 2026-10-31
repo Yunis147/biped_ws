@@ -12,273 +12,273 @@
 </xacro:if>
 <link name="base_link">
   <inertial>
-    <origin xyz="0.003008 -0.002156 0.031318" rpy="0 0 0"></origin>
-    <mass value="0.722478"></mass>
-    <inertia ixx="0.001101" iyy="0.001216" izz="0.000555" ixy="-0.000034" iyz="0.00002" ixz="-0.00006"></inertia>
+    <origin xyz="0.000766650640 -0.001787672921 0.033975024314" rpy="0 0 0"></origin>
+    <mass value="0.325100"></mass>
+    <inertia ixx="6.407410482130e-04" iyy="7.101862886285e-04" izz="2.496903287177e-04" ixy="-4.403609932476e-06" iyz="7.448920819941e-07" ixz="-3.877009879286e-05"></inertia>
   </inertial>
   <visual>
     <origin xyz="0 0 0" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/base_link.stl" scale="0.00103866882927948 0.000819417891757447 0.0007647584051399"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0 0 0" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/base_link.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/base_link.stl" scale="0.00103866882927948 0.000819417891757447 0.0007647584051399"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_hip_lower_link_1">
   <inertial>
-    <origin xyz="-0.018233 -0.000383 -0.01695" rpy="0 0 0"></origin>
-    <mass value="0.027339"></mass>
-    <inertia ixx="0.000008" iyy="0.000008" izz="0.000009" ixy="-0" iyz="-0" ixz="-0"></inertia>
+    <origin xyz="-0.019243149626 0.002687242014 -0.005418970161" rpy="0 0 0"></origin>
+    <mass value="0.022200"></mass>
+    <inertia ixx="7.071595504810e-06" iyy="7.061550705198e-06" izz="8.647705730767e-06" ixy="-5.346628500479e-09" iyz="8.023534868456e-08" ixz="8.023534868503e-08"></inertia>
   </inertial>
   <visual>
     <origin xyz="-0.01751 -0.052501 0.040926" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_hip_lower_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_hip_lower_link_1.stl" scale="0.00100000008496715 0.000959391015625839 0.000985152968974084"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="-0.01751 -0.052501 0.040926" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_hip_lower_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_hip_lower_link_1.stl" scale="0.00100000008496715 0.000959391015625839 0.000985152968974084"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_hip_lower_link_1">
   <inertial>
-    <origin xyz="-0.018233 0.000383 -0.01695" rpy="0 0 0"></origin>
-    <mass value="0.027339"></mass>
-    <inertia ixx="0.000008" iyy="0.000008" izz="0.000009" ixy="0" iyz="0" ixz="-0"></inertia>
+    <origin xyz="-0.018643149626 -0.005230757986 -0.005418970161" rpy="0 0 0"></origin>
+    <mass value="0.022200"></mass>
+    <inertia ixx="7.071595504810e-06" iyy="7.061550705198e-06" izz="8.647705730767e-06" ixy="-5.346628500478e-09" iyz="8.023534868457e-08" ixz="8.023534868503e-08"></inertia>
   </inertial>
   <visual>
     <origin xyz="-0.01751 0.052501 0.040926" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_hip_lower_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_hip_lower_link_1.stl" scale="0.00100000008496715 0.000959391015625839 0.000985152968974084"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="-0.01751 0.052501 0.040926" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_hip_lower_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_hip_lower_link_1.stl" scale="0.00100000008496715 0.000959391015625839 0.000985152968974084"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_thigh_link_1">
   <inertial>
-    <origin xyz="0.000007 -0.020639 -0.036026" rpy="0 0 0"></origin>
-    <mass value="0.174697"></mass>
-    <inertia ixx="0.000136" iyy="0.000126" izz="0.000026" ixy="-0" iyz="-0" ixz="0"></inertia>
+    <origin xyz="0.000672256426 -0.025691948992 -0.025638526128" rpy="0 0 0"></origin>
+    <mass value="0.157100"></mass>
+    <inertia ixx="1.161841640172e-04" iyy="1.109926807680e-04" izz="2.160000145921e-05" ixy="-6.484734266493e-10" iyz="-7.606654262845e-10" ixz="2.418135621187e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 0.031876 0.074826" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_thigh_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_thigh_link_1.stl" scale="0.000959170601848916 0.00101476510067114 0.00102002702793833"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 0.031876 0.074826" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_thigh_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_thigh_link_1.stl" scale="0.000959170601848916 0.00101476510067114 0.00102002702793833"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_thigh_link_1">
   <inertial>
-    <origin xyz="0.000007 0.020639 -0.036026" rpy="0 0 0"></origin>
-    <mass value="0.174697"></mass>
-    <inertia ixx="0.000136" iyy="0.000126" izz="0.000026" ixy="0" iyz="0" ixz="0"></inertia>
+    <origin xyz="0.000072105916 0.024055128639 -0.026041769013" rpy="0 0 0"></origin>
+    <mass value="0.157100"></mass>
+    <inertia ixx="1.132659256294e-04" iyy="1.080786361068e-04" izz="2.159580385291e-05" ixy="6.026618561874e-10" iyz="8.331259812613e-08" ixz="-2.325812050552e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 -0.031876 0.074826" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_thigh_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_thigh_link_1.stl" scale="0.000959170601848916 0.0010161073852349 0.00101027361649158"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 -0.031876 0.074826" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_thigh_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_thigh_link_1.stl" scale="0.000959170601848916 0.0010161073852349 0.00101027361649158"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_calf_link_1">
   <inertial>
-    <origin xyz="-0.000054 -0.018976 -0.052521" rpy="0 0 0"></origin>
-    <mass value="0.111030"></mass>
-    <inertia ixx="0.000054" iyy="0.000052" izz="0.000022" ixy="-0" iyz="-0.000001" ixz="0.000001"></inertia>
+    <origin xyz="0.001122282116 -0.023608079303 -0.040654265749" rpy="0 0 0"></origin>
+    <mass value="0.092100"></mass>
+    <inertia ixx="3.484892991952e-05" iyy="3.410910807755e-05" izz="1.552642904907e-05" ixy="-2.512036889358e-08" iyz="1.619569766446e-07" ixz="6.112166255965e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 0.033876 0.146878" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_calf_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_calf_link_1.stl" scale="0.0010269250518823 0.000951878287242462 0.000960562940863274"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 0.033876 0.146878" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_calf_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_calf_link_1.stl" scale="0.0010269250518823 0.000951878287242462 0.000960562940863274"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_calf_link_1">
   <inertial>
-    <origin xyz="-0.000054 0.018976 -0.052521" rpy="0 0 0"></origin>
-    <mass value="0.111030"></mass>
-    <inertia ixx="0.000054" iyy="0.000052" izz="0.000022" ixy="0" iyz="0.000001" ixz="0.000001"></inertia>
+    <origin xyz="0.000522282116 0.021649235447 -0.040654265749" rpy="0 0 0"></origin>
+    <mass value="0.092100"></mass>
+    <inertia ixx="3.484934390170e-05" iyy="3.410910807755e-05" izz="1.552684303125e-05" ixy="-2.543820630504e-08" iyz="1.811350643404e-07" ixz="6.112166255965e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 -0.033876 0.146878" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_calf_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_calf_link_1.stl" scale="0.0010269250518823 0.000951878250378221 0.000960562940863274"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 -0.033876 0.146878" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_calf_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_calf_link_1.stl" scale="0.0010269250518823 0.000951878250378221 0.000960562940863274"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_ankle_link_1">
   <inertial>
-    <origin xyz="-0.018233 0.000383 -0.01695" rpy="0 0 0"></origin>
-    <mass value="0.027339"></mass>
-    <inertia ixx="0.000008" iyy="0.000008" izz="0.000009" ixy="0" iyz="0" ixz="-0"></inertia>
+    <origin xyz="-0.016743149626 -0.003804757986 -0.004582970161" rpy="0 0 0"></origin>
+    <mass value="0.022800"></mass>
+    <inertia ixx="7.262719707643e-06" iyy="7.252403426960e-06" izz="8.881427507274e-06" ixy="-5.491131973465e-09" iyz="8.240387162197e-08" ixz="8.240387162247e-08"></inertia>
   </inertial>
   <visual>
     <origin xyz="-0.01751 0.052977 0.219062" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_ankle_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_ankle_link_1.stl" scale="0.00100000008496714 0.000959391015625839 0.000985152794667887"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="-0.01751 0.052977 0.219062" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_ankle_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_ankle_link_1.stl" scale="0.00100000008496714 0.000959391015625839 0.000985152794667887"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_ankle_link_1">
   <inertial>
-    <origin xyz="-0.018233 -0.000383 -0.01695" rpy="0 0 0"></origin>
-    <mass value="0.027339"></mass>
-    <inertia ixx="0.000008" iyy="0.000008" izz="0.000009" ixy="-0" iyz="-0" ixz="-0"></inertia>
+    <origin xyz="-0.017343149626 0.003261242014 -0.004582970161" rpy="0 0 0"></origin>
+    <mass value="0.022800"></mass>
+    <inertia ixx="7.262719707643e-06" iyy="7.252403426960e-06" izz="8.881427507274e-06" ixy="-5.491131973466e-09" iyz="8.240387162198e-08" ixz="8.240387162247e-08"></inertia>
   </inertial>
   <visual>
     <origin xyz="-0.01751 -0.052977 0.219062" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_ankle_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_ankle_link_1.stl" scale="0.00100000008496714 0.000959390941315452 0.000985152794667887"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="-0.01751 -0.052977 0.219062" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_ankle_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_ankle_link_1.stl" scale="0.00100000008496714 0.000959390941315452 0.000985152794667887"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_foot_link_1">
   <inertial>
-    <origin xyz="0.012165 -0.020745 -0.00995" rpy="0 0 0"></origin>
-    <mass value="0.102795"></mass>
-    <inertia ixx="0.000022" iyy="0.000032" izz="0.000031" ixy="0.000001" iyz="-0" ixz="0.000007"></inertia>
+    <origin xyz="0.019198808441 -0.024336599218 0.000423413222" rpy="0 0 0"></origin>
+    <mass value="0.102500"></mass>
+    <inertia ixx="2.148345359341e-05" iyy="4.235029927269e-05" izz="3.961706530251e-05" ixy="2.618623520470e-07" iyz="-1.700688404074e-07" ixz="9.278835203841e-06"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 0.032352 0.252962" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_foot_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_foot_link_1.stl" scale="0.00100000000222223 0.00102149108993289 0.000962561189483049"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 0.032352 0.252962" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_foot_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_foot_link_1.stl" scale="0.00100000000222223 0.00102149108993289 0.000962561189483049"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_foot_link_1">
   <inertial>
-    <origin xyz="0.012165 0.020745 -0.00995" rpy="0 0 0"></origin>
-    <mass value="0.102795"></mass>
-    <inertia ixx="0.000022" iyy="0.000032" izz="0.000031" ixy="-0.000001" iyz="0" ixz="0.000007"></inertia>
+    <origin xyz="0.018705492509 0.024676201298 0.000608178342" rpy="0 0 0"></origin>
+    <mass value="0.102500"></mass>
+    <inertia ixx="2.143786350959e-05" iyy="4.242371845947e-05" izz="3.973655117572e-05" ixy="-3.188868054575e-07" iyz="1.671540799167e-07" ixz="9.188849161563e-06"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.001115 -0.032352 0.252962" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_foot_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_foot_link_1.stl" scale="0.00100000000222223 0.00102417575857505 0.00096256118948305"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.001115 -0.032352 0.252962" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_foot_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_foot_link_1.stl" scale="0.00100000000222223 0.00102417575857505 0.00096256118948305"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="r_hip_upper_link_1">
   <inertial>
-    <origin xyz="0.000373 -0.028289 -0.025073" rpy="0 0 0"></origin>
-    <mass value="0.106649"></mass>
-    <inertia ixx="0.000034" iyy="0.000033" izz="0.000021" ixy="0" iyz="-0.000002" ixz="0.000001"></inertia>
+    <origin xyz="-0.000111096990 -0.034974486059 -0.012755038361" rpy="0 0 0"></origin>
+    <mass value="0.086500"></mass>
+    <inertia ixx="2.456884078024e-05" iyy="2.465966953706e-05" izz="1.406796382804e-05" ixy="-4.144019842280e-08" iyz="-1.362989066975e-06" ixz="2.568579582987e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.00159 0.021672 0.00015" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_hip_upper_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_hip_upper_link_1.stl" scale="0.00101476510067114 0.0010183082873301 0.00106175992445424"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.00159 0.021672 0.00015" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/r_hip_upper_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/r_hip_upper_link_1.stl" scale="0.00101476510067114 0.0010183082873301 0.00106175992445424"></mesh>
     </geometry>
   </collision>
 </link>
 
 <link name="l_hip_upper_link_1">
   <inertial>
-    <origin xyz="0.000373 0.028289 -0.025073" rpy="0 0 0"></origin>
-    <mass value="0.106649"></mass>
-    <inertia ixx="0.000034" iyy="0.000033" izz="0.000021" ixy="-0" iyz="0.000002" ixz="0.000001"></inertia>
+    <origin xyz="-0.000679295306 0.031238295124 -0.012755038367" rpy="0 0 0"></origin>
+    <mass value="0.086500"></mass>
+    <inertia ixx="2.448043685497e-05" iyy="2.466315392321e-05" izz="1.398304421587e-05" ixy="1.844313092225e-08" iyz="1.560187364722e-06" ixz="2.201393020701e-07"></inertia>
   </inertial>
   <visual>
     <origin xyz="0.00159 -0.021672 0.00015" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_hip_upper_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_hip_upper_link_1.stl" scale="0.00101737025550025 0.0010183082873301 0.00106175992445424"></mesh>
     </geometry>
     <material name="silver"></material>
   </visual>
   <collision>
     <origin xyz="0.00159 -0.021672 0.00015" rpy="0 0 0"></origin>
     <geometry>
-      <mesh filename="package://robotv2_description/meshes/l_hip_upper_link_1.stl" scale="0.001 0.001 0.001"></mesh>
+      <mesh filename="package://robotv2_description/meshes/l_hip_upper_link_1.stl" scale="0.00101737025550025 0.0010183082873301 0.00106175992445424"></mesh>
     </geometry>
   </collision>
 </link>

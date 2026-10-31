@@ -18,6 +18,28 @@ all mesh files exist, and forward kinematics on the collision meshes gives the l
 0.2845 m below `base_link` (spawn height 0.29 m).
 **Not** verified: running inside Gazebo itself (needs your machine).
 
+## Current mass and inertia update
+
+The original STL meshes have been restored at the user's request. Mesh dimensions and
+geometry origins/scales remain those of the original URDF; CAD dimensional equivalence is
+not claimed for the current visual/collision geometry.
+
+Measured masses and the calculated CAD-based centres of mass and inertia tensors remain
+in `urdf/robot.urdf.xacro`. Total mass is **1.291500 kg**: head/base **0.325100 kg** and
+**0.483200 kg** per leg. These inertials represent the CAD-based mass model, while the
+restored meshes retain the original geometry.
+
+The Pi/mount is an estimated 80 g uniform 85.6 × 56.5 × 17.5 mm box, centred horizontally
+on the CAD head's top platform. Two 3 g holders are approximated as point masses; each
+physical link includes 6 g wiring distributed proportionally to its other mass components.
+The two 5.9 g board braces contribute to the head inertia without adding mesh geometry.
+Motor mass is 67.7 g including horn and screws, distributed uniformly over its CAD solids.
+
+[`config/cad_mass_properties.json`](config/cad_mass_properties.json) records the tensors,
+centres of mass, assumptions, and historical CAD-export measurements. Its mesh measurements
+are **not measurements of the currently restored meshes**. Joint definitions are unchanged;
+articulated-motion alignment has not been validated.
+
 ## Install (Ubuntu 24.04 + ROS2 Jazzy)
 ```bash
 sudo apt update
