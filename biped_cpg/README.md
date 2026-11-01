@@ -1,12 +1,14 @@
 # biped_cpg: smaller-lean CPG walking
 
-This is a **separate simulation experiment**. The quasi-static walker and all
+This is a **separate walking controller with hardware and simulation modes**. The quasi-static walker and all
 other existing packages are unchanged. It uses the updated URDF and foot meshes,
 with the same 12-joint position-command interface.
 
-The controller uses **no IMU, force, contact or measured joint-position feedback**.
-MuJoCo measurements are used in tests to check the result, never to adjust the
-walking commands. The node requires `use_sim_time:=true` and a running `/clock`.
+The controller uses **no IMU, force or contact feedback**. In hardware mode it
+uses servo positions and bridge diagnostics to check readiness and tracking;
+these checks pause or stop progression, rather than change the walking shape.
+It still cannot measure body tilt or confirm that a foot is planted. Simulation
+mode retains the original open-loop trajectory and uses simulation time.
 
 ![Actual MuJoCo run, at normal playback speed](assets/cpg_walk.gif)
 
@@ -30,6 +32,90 @@ This is deliberately slow walking, **not human walking speed**. At the default
 joint limits the computed full cycle is about **20.48 s forward / 20.05 s backward**,
 covering two steps. That is about 10 seconds per step. A smaller requested period
 does not override the motion limits.
+
+## Run separately after your hardware bringup
+
+Use your existing robot launch **without `walk:=true`**. Walking is already off
+by default there; this package does not start, stop or modify that launch:
+
+```bash
+ros2 launch biped_bringup hardware.launch.py
+```
+
+Rebuild the updated CPG once, from the workspace root, and source it in each
+terminal you use:
+
+```bash
+cd /external_storage/manasa/biped
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-select biped_cpg
+source install/setup.bash
+```
+
+After your robot bringup finishes startup positioning, run the CPG separately:
+
+```bash
+ros2 run biped_cpg cpg_walk
+```
+
+It defaults to hardware mode (`use_sim_time=false`), using a monotonic computer
+clock. **No MuJoCo environment, `/clock`, or IMU is needed.** It does not enable
+servo torque, call motor services, or start walking automatically.
+
+The existing node-only launch is also available:
+
+```bash
+ros2 launch biped_cpg cpg.launch.py
+```
+
+There is **no additional hardware launch file** in this package. To load a custom
+configuration, use `config:=/absolute/path/cpg.yaml` with this existing launch.
+
+Check feedback/status in another sourced terminal:
+
+```bash
+ros2 topic echo /cpg/status --once
+ros2 topic pub --once /cpg_cmd std_msgs/msg/String "{data: 'step'}"
+```
+
+`step` approaches the known starting stance, takes one right-foot step, then
+centres and holds. `start`/`forward`, `backward`, `stop`, and `hold` use the same
+`/cpg_cmd` interface described below. Use support against a fall for the first
+physical step; physical walking has not been validated by these software tests.
+
+### What hardware mode checks
+
+- `/joint_states` contains all 12 named, finite joint angles, inside URDF limits.
+  Messages must have fresh source timestamps and arrive within 0.25 seconds.
+  Joint velocity is read or estimated from consecutive position samples.
+- The actual `servo_bridge` diagnostic reports torque ON, startup positioning
+  finished, and no health warning/error. Diagnostic freshness limit: 2.5 seconds,
+  allowing for the bridge's 1 Hz diagnostic output.
+- Before starting, servos must be approximately stationary and within 0.05 rad
+  (2.86°) of calibrated zero on the first run, or the last CPG held stance on a
+  restart. Arbitrary folded-pose homing is refused.
+- The first target captures the measured pose. A synchronized approach moves to
+  the known stance at at most 0.10 rad/s, then checks settling before lowering
+  into the existing walking trajectory. A restart recompiles the held stance
+  before any new movement, then rechecks fresh feedback.
+- Tracking error above 0.04 rad (2.29°) pauses **the whole path** until the motors
+  catch up. Lag lasting over 2 seconds or error above 0.15 rad (8.59°) latches a
+  fault and holds the last target. Joint angles are not independently clipped.
+- Stale/invalid feedback, torque OFF, bridge health errors, startup repositioning,
+  or another command publisher suppress further targets; the existing bridge
+  retains its own watchdog/holding behaviour. Torque is never changed here.
+
+`hardware_ready` in `/cpg/status` means feedback is fresh and the bridge is
+healthy. Starting also checks stationary speed and proximity to the known pose.
+`tracking_paused`, `max_tracking_error_rad`, `readiness`, and `fault` explain a
+pause or refusal. Hardware thresholds are startup-only ROS parameters prefixed
+with `hardware_`, for example `hardware_tracking_pause`.
+
+A fault requires supporting the robot and restarting the CPG from a known stance;
+there is no automatic reset or attempt to lower a raised foot after a fault.
+`stop` during the small measured-pose startup approach holds there and latches a
+fault. During the normal gait it finishes the step and centres as usual.
+These are servo interlocks, not body-balance feedback or fall recovery.
 
 ## Build and run in MuJoCo
 
@@ -115,7 +201,7 @@ simulation. Do not reset the simulator underneath an active walker.
 Leave that simulation's original walker disabled. Start only this controller:
 
 ```bash
-ros2 launch biped_cpg cpg.launch.py
+ros2 launch biped_cpg cpg.launch.py sim:=true
 ```
 
 For Gazebo the existing bringup command is
@@ -219,15 +305,23 @@ with `config:=/absolute/path/cpg.yaml`.
 
 ## Verification
 
-**18 automated tests pass**, including four physics subcases. The checks cover
+The hardware interlocks are tested with generated servo feedback only; no real
+servo bus was opened. Tests cover source timestamp freshness, joint name ordering,
+torque/startup/health gating, measured first targets, settling, tracking pause and
+resume, persistent lag faults, stale feedback and suppressed output. An isolated
+ROS test also exercises the standalone hardware node without `/clock`, including
+a complete single step with a fake bridge and torque-OFF refusal/suppression.
+These checks do not constitute a physical robot walking test.
+
+**29 automated tests pass**, including four physics subcases. The checks cover
 phase coupling, time-step independence, table seams, joint motion bounds, no
 commands before start, one-step mode, stopping, reverse restarts, clock faults,
 and suppressed output for a competing controller.
 
 The ROS launch was also exercised headlessly with the actual simulator in an isolated ROS
 domain: one step and stop, reverse restart through two landings, and suppression
-when another command publisher appeared. The controller has no IMU or
-joint-state subscriptions.
+when another command publisher appeared. Simulation mode has no IMU or joint-state subscriptions. Hardware mode
+subscribes to joint states and diagnostics, never IMU data.
 
 The physics runs use MuJoCo 3.17.0, the updated URDF, the existing simulator's
 contact/friction/rotor-inertia defaults, a 50 Hz controller, and 50% of the

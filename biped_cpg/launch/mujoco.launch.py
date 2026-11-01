@@ -34,7 +34,7 @@ def generate_launch_description():
                  'torque_fraction': ParameterValue(LaunchConfiguration('torque_fraction'), value_type=float),
                  'real_time_factor': ParameterValue(LaunchConfiguration('real_time_factor'), value_type=float)}]),
         IncludeLaunchDescription(PythonLaunchDescriptionSource(str(me / 'launch/cpg.launch.py')),
-                                 launch_arguments={'config': LaunchConfiguration('config')}.items()),
+                                 launch_arguments={'config': LaunchConfiguration('config'), 'sim': 'true'}.items()),
         Node(package='rviz2', executable='rviz2', output='screen',
              condition=IfCondition(LaunchConfiguration('rviz')),
              parameters=[{'use_sim_time': True}], arguments=['-d', str(desc / 'rviz/display.rviz')]),

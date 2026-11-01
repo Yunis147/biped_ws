@@ -2,11 +2,13 @@
 <package format="3">
   <name>biped_cpg</name>
   <version>0.1.0</version>
-  <description>Coupled-oscillator, small-lean biped walking experiments in simulation.</description>
+  <description>Coupled-oscillator, small-lean biped walking with hardware tracking checks and simulation support.</description>
   <maintainer email="you@example.com">biped</maintainer>
   <license>MIT</license>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>

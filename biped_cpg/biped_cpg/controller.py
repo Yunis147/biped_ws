@@ -1,4 +1,4 @@
-"""Clock-driven walking state machine; it never reads robot/simulator sensors."""
+"""Clock-driven walking state machine; gait rhythm stays independent of robot/simulator sensors."""
 import math
 
 import numpy as np
@@ -53,7 +53,7 @@ class Walker:
                 self.fail('hold requested: keeping the last target')
             return 'holding'
         if self.state == 'fault':
-            raise ValueError(f'fault: {self.fault}; restart the node and reset the simulation')
+            raise ValueError(f'fault: {self.fault}; support the robot and restart from a known stance')
         if command == 'stop':
             if self.state == 'preparing':
                 self.stop_requested = True
@@ -85,7 +85,7 @@ class Walker:
         dt = now - self.last_time
         self.last_time = now
         if self.active and dt < -1e-8:
-            self.fail('simulation clock moved backwards; restart after resetting simulation', suppress=True)
+            self.fail('clock moved backwards; restart from a known stance', suppress=True)
         if self.resync and dt >= 0 and not self.suppress and self.state != 'fault':
             # A restart may compile a new stance while the separate simulator
             # advances. Synchronize on its first fresh clock; hold the old pose.
