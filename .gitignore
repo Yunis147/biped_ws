@@ -1,1 +1,25 @@
 docs/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Python packaging and virtual environments
+*.egg-info/
+.eggs/
+.venv/
+venv/
+
+# Generated ROS 2 / colcon workspace output
+/build/
+/install/
+/log/

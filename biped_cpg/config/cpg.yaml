@@ -1,0 +1,16 @@
+biped_cpg:
+  ros__parameters:
+    body_roll: 0.08                  # 4.58 degrees; this is planned lean, not IMU feedback
+    crouch: 0.028                    # body 28 mm below URDF zero height in single support
+    centre_crouch: 0.020
+    com_inset: 0.008                 # target 8 mm inward from support-foot centre
+    forward_step: 0.020
+    backward_step: 0.016
+    clearance: 0.010
+    double_support: 0.6              # fraction of each half-cycle with both feet planted
+    stride_progress: 0.5             # move CoM from behind to ahead of stance foot during swing
+    requested_period: 12.0          # lower bound; lengthened to obey joint motion limits
+    max_joint_speed: 0.35
+    max_joint_acceleration: 0.6
+    minimum_margin: 0.010
+    half_samples: 120
