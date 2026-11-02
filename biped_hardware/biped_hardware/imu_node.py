@@ -13,7 +13,7 @@ except ImportError:
     HAVE_ROS = False
     Node = object
 
-from .bno055 import BNO055, MockBNO055
+from .bno085 import BNO085, MockBNO085
 from .config import load_config
 
 
@@ -34,9 +34,9 @@ class ImuNode(Node):
         if sensor is not None:
             self.sensor = sensor
         elif gp("mock"):
-            self.sensor = MockBNO055()
+            self.sensor = MockBNO085()
         else:
-            self.sensor = BNO055(int(gp("i2c_bus")), int(gp("address")), gp("mode"))
+            self.sensor = BNO085(int(gp("i2c_bus")), int(gp("address")), gp("mode"))
         self.sensor.initialize()                     # raises with a clear message if the chip is not found
         self.pub = self.create_publisher(Imu, "/imu", 10)
         self.pub_cal = self.create_publisher(UInt8MultiArray, "/imu/calibration", 10)

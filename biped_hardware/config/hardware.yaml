@@ -64,8 +64,8 @@ pid:
 
 imu:
   enabled: true
-  i2c_bus: 7
-  address: 0x28
+  i2c_bus: 1
+  address: 0x4A
   mode: imuplus
-  rate_hz: 100
+  rate_hz: 50
   frame_id: imu_link
