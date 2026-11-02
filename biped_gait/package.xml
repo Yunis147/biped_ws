@@ -3,12 +3,15 @@
 <package format="3">
   <name>biped_gait</name>
   <version>0.1.0</version>
-  <description>Open-loop quasi-static walking for the BipedRobot V2. Publishes joint targets to
+  <description>IMU-feedback quasi-static walking for the BipedRobot V2. Publishes joint targets to
     /position_controller/commands, so it drives Gazebo and the real robot (biped_hardware) identically.</description>
   <maintainer email="you@example.com">biped</maintainer>
   <license>MIT</license>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>robotv2_description</exec_depend>

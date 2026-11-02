@@ -4,23 +4,10 @@ quasi_static_walk.py  —  floor-constrained quasi-static biped gait
 Robot : AsterisCrack BipedRobot V2        Stack : ROS 2 Jazzy + Gazebo Harmonic
 
 WHAT IT DOES
-  Open-loop walking on a level floor with a planned sideways torso lean. Foot positions
-  follow smooth Cartesian paths; leg IK solves all six joints, keeping soles
-  level and their heading fixed. The walking height leaves knee bend available
-  at touchdown. Weight transfer and stopping preserve the planted-foot spacing.
-  Start lowers into the walking stance; stop holds a centred, bent-knee stance
-  with the feet where they landed. No IMU or contact feedback is used.
-  `python3 quasi_static_walk.py --check` validates the commanded geometry without ROS.
-
-COMMANDS   (topic /walk_cmd, std_msgs/String)
-  start | forward   walk forward         backward   walk backward
-  stop              finish the step, then stand
-  (change direction only while standing: send `stop`, wait, then the new direction)
-
-RUN IN GAZEBO  (use sim time so the gait follows the simulator clock)
-  ros2 run biped_gait quasi_static_walk --ros-args -p use_sim_time:=true
-RUN ON THE REAL ROBOT (no sim time)
-  ros2 run biped_gait quasi_static_walk
+  Geometry and URDF helpers for the biped. The executable now runs the smaller-
+  lean, IMU-feedback controller in feedback_walk.py / walking_node.py. CPG and
+  balance users retain the original pure-helper defaults without modification.
+  --check validates the NEW walking profile without ROS or motor commands.
 
 JOINT ORDER = controllers.yaml  (index: joint)
   0 r_hip_yaw  1 r_hip_roll  2 r_hip_pitch  3 r_knee  4 r_ankle_pitch  5 r_ankle_roll
@@ -44,7 +31,8 @@ except ImportError:                      # lets `--check` run without ROS
 # ═══════════════════════════════════════════════════════════════════════
 #  TUNING — metres, radians and seconds. Validated against the rigid robot model.
 # ═══════════════════════════════════════════════════════════════════════
-# These are conservative motion choices, not dimensions copied from the robot.
+# Legacy pure-helper defaults for dependent packages. The executable uses
+# Settings in feedback_walk.py / config/walk.yaml, with 4.58-degree lean.
 CROUCH_DEPTH = 0.040       # 40 mm below the zero-angle standing height
 BODY_ROLL = 0.20           # 11.46 degrees toward the supporting leg
 STEP_LENGTH = {'forward': 0.020, 'backward': 0.016}  # landing ahead of the other foot
@@ -285,48 +273,58 @@ def _balanced_pose(feet, desired_com, body, seed, roll):
     raise ValueError('whole-robot mass balance solve did not converge')
 
 
-def _plan(direction, standing=None):
+def _plan(direction, standing=None, profile=None):
+    height = BODY_HEIGHT if profile is None else ZERO_HEIGHT-profile['crouch']
+    centre_height = CENTER_HEIGHT if profile is None else ZERO_HEIGHT-profile['centre_crouch']
+    roll = BODY_ROLL if profile is None else profile['body_roll']
+    clearance = SWING_CLEARANCE if profile is None else profile['clearance']
+    inset = 0. if profile is None else profile['com_inset']
+    lift_clearance = clearance if profile is None else profile.get('lift_clearance', .006)
     if direction not in STEP_LENGTH:
         raise ValueError(f'unknown walking direction: {direction}')
     neutral = dict(zip(JOINT_ORDER, np.zeros(12) if standing is None else standing))
     if not all(np.isfinite(list(neutral.values()))):
         raise ValueError('invalid starting pose')
     feet = {s: _sole_center(neutral, s) for s in 'rl'}
-    height = -float(np.mean([f[2] for f in feet.values()]))
+    initial_height = -float(np.mean([f[2] for f in feet.values()]))
     if any(np.linalg.norm(_foot_transform(neutral, s)[0] - np.eye(3)) > 1e-4 for s in 'rl'):
         raise ValueError('start requires an upright, level-foot standing pose')
     if abs(feet['r'][2] - feet['l'][2]) > 1e-5:
         raise ValueError('starting soles are not on the same ground plane')
     for side in 'rl':
-        feet[side] = feet[side] + [0, 0, height]
+        feet[side] = feet[side] + [0, 0, initial_height]
     middle = (feet['r'][:2] + feet['l'][:2]) * 0.5
     initial_com, _ = _com_and_feet(neutral)
     step = STEP_LENGTH[direction] * (1 if direction == 'forward' else -1)
     states = {}
 
-    def add(name, com, roll=0.0, z=BODY_HEIGHT):
+    def add(name, com, roll=0.0, z=height):
         states[name] = dict(feet={s: f.copy() for s, f in feet.items()},
                             com=np.array(com).copy(), roll=roll, height=z)
 
-    add('neutral', initial_com[:2], z=height)
-    add('ready', middle, z=CENTER_HEIGHT)
-    add('lean_left', feet['l'][:2], -BODY_ROLL)
-    feet['r'][2] = SWING_CLEARANCE
-    add('lift_right_1st', feet['l'][:2], -BODY_ROLL)
+    add('neutral', initial_com[:2], z=initial_height)
+    add('ready', middle, z=centre_height)
+    left_target = lambda: feet['l'][:2] - [0, inset]
+    right_target = lambda: feet['r'][:2] + [0, inset]
+    add('lean_left', left_target(), -roll)
+    feet['r'][2] = lift_clearance
+    add('lift_right_1st', left_target(), -roll)
     feet['r'][0] = feet['l'][0] + step
-    add('swing_right', feet['l'][:2], -BODY_ROLL)
+    feet['r'][2] = clearance
+    add('swing_right', left_target(), -roll)
     feet['r'][2] = 0.0
-    add('place_right', feet['l'][:2], -BODY_ROLL)
-    add('lean_right', feet['r'][:2], BODY_ROLL)
-    feet['l'][2] = SWING_CLEARANCE
-    add('lift_left', feet['r'][:2], BODY_ROLL)
+    add('place_right', left_target(), -roll)
+    add('lean_right', right_target(), roll)
+    feet['l'][2] = lift_clearance
+    add('lift_left', right_target(), roll)
     feet['l'][0] = feet['r'][0] + step
-    add('swing_left', feet['r'][:2], BODY_ROLL)
+    feet['l'][2] = clearance
+    add('swing_left', right_target(), roll)
     feet['l'][2] = 0.0
-    add('place_left', feet['r'][:2], BODY_ROLL)
-    add('lean_left_cycle', feet['l'][:2], -BODY_ROLL)
-    feet['r'][2] = SWING_CLEARANCE
-    add('lift_right', feet['l'][:2], -BODY_ROLL)
+    add('place_left', right_target(), roll)
+    add('lean_left_cycle', left_target(), -roll)
+    feet['r'][2] = lift_clearance
+    add('lift_right', left_target(), -roll)
     return neutral, states
 
 
@@ -344,17 +342,17 @@ STANCE = {'lift_right_1st': 'l', 'lift_right': 'l', 'swing_right': 'l', 'place_r
           'lift_left': 'r', 'swing_left': 'r', 'place_left': 'r'}
 
 
-def _height_between(start, end, u):
+def _height_between(start, end, u, profile=None):
     height = start['height'] + u * (end['height'] - start['height'])
     if start['roll'] * end['roll'] < 0:
         # Raise the pelvis in the middle of a transfer, where both legs are
         # under it. Lower again for the longer sideways reach in single support.
-        height += (CENTER_HEIGHT - BODY_HEIGHT) * 16 * u*u * (1-u)*(1-u)
+        height += ((CENTER_HEIGHT - BODY_HEIGHT) if profile is None else (profile['crouch']-profile['centre_crouch'])) * 16 * u*u * (1-u)*(1-u)
     return height
 
 
-def _plan_keyframes(direction, standing=None):
-    q, states = _plan(direction, standing)
+def _plan_keyframes(direction, standing=None, profile=None):
+    q, states = _plan(direction, standing, profile)
     frames = {'neutral': dict(q)}
     bodies = {'neutral': np.array([0., 0., states['neutral']['height']])}
     body = bodies['neutral'].copy()
@@ -365,7 +363,7 @@ def _plan_keyframes(direction, standing=None):
         for u in np.linspace(0, 1, 21)[1:]:
             feet = {s: previous['feet'][s] + u * (state['feet'][s] - previous['feet'][s]) for s in 'rl'}
             com = previous['com'] + u * (state['com'] - previous['com'])
-            body[2] = _height_between(previous, state, u)
+            body[2] = _height_between(previous, state, u, profile)
             roll = previous['roll'] + u * (state['roll'] - previous['roll'])
             try:
                 q, body = _balanced_pose(feet, com, body, q, roll)
@@ -387,15 +385,15 @@ def _foot_targets(direction, standing=None):
                                for name, q in frames.items()}
 
 
-def build_tables(direction, standing=None):
+def build_tables(direction, standing=None, profile=None):
     """Solve every sample for foot contact, torso lean AND whole-robot balance."""
-    kf, bodies, states = _plan_keyframes(direction, standing)
+    kf, bodies, states = _plan_keyframes(direction, standing, profile)
     tables = {}
     for a, b in SEGMENTS:
         start = states[a]
         if b == 'neutral':
             end = dict(feet=start['feet'], com=(start['feet']['r'][:2] + start['feet']['l'][:2]) * 0.5,
-                       roll=0.0, height=CENTER_HEIGHT)
+                       roll=0.0, height=CENTER_HEIGHT if profile is None else ZERO_HEIGHT-profile['centre_crouch'])
         else:
             end = states[b]
             if (a, b) == ('lift_right', 'swing_right'):
@@ -409,7 +407,7 @@ def build_tables(direction, standing=None):
             u = _smoothstep(k / TABLE_SAMPLES)
             feet = {s: start['feet'][s] + u * (end['feet'][s] - start['feet'][s]) for s in 'rl'}
             com = start['com'] + u * (end['com'] - start['com'])
-            body[2] = _height_between(start, end, u)
+            body[2] = _height_between(start, end, u, profile)
             roll = start['roll'] + u * (end['roll'] - start['roll'])
             if k:
                 try:
@@ -512,7 +510,7 @@ def _ground_frame(q, reference='l'):
     return rotation @ com, {s: f @ rotation.T for s, f in feet.items()}, rotation
 
 
-def gait_metrics(kf, tables):
+def gait_metrics(kf, tables, profile=None):
     """Check the full interpolated motion, using the INTENDED support foot.
 
     Rotating into the supporting sole's frame accounts for the planned body
@@ -551,7 +549,10 @@ def gait_metrics(kf, tables):
                 current = feet['r'].mean(axis=0) - feet['l'].mean(axis=0)
                 spacing_error = max(spacing_error, float(np.linalg.norm(current - spacing)))
             else:
-                com_error = max(com_error, float(np.linalg.norm(com[:2] - feet[loaded][:, :2].mean(axis=0))))
+                target = feet[loaded][:, :2].mean(axis=0).copy()
+                if profile is not None:
+                    target[1] += profile['com_inset'] * (1 if loaded == 'r' else -1)
+                com_error = max(com_error, float(np.linalg.norm(com[:2] - target)))
             for side in 'rl':
                 R, _ = _foot_transform(q, side)
                 rotation_error = max(rotation_error, float(np.linalg.norm(rotation @ R - np.eye(3)) / math.sqrt(2)))
@@ -576,10 +577,10 @@ def check_gait(direction, kf, tables):
     return metrics['margin'], metrics['where'], metrics['clearance']
 
 
-def report(direction, kf, tables, log):
-    m = gait_metrics(kf, tables)
+def report(direction, kf, tables, log, profile=None):
+    m = gait_metrics(kf, tables, profile)
     ok = (m['margin'] >= MIN_SUPPORT_MARGIN * 1000
-          and m['clearance'] >= SWING_CLEARANCE * 1000 - 0.1 and m['ground_error'] <= 0.2
+          and m['clearance'] >= (SWING_CLEARANCE if profile is None else profile['clearance']) * 1000 - 0.1 and m['ground_error'] <= 0.2
           and m['spacing_error'] <= 0.2 and m['rotation_error'] <= 0.002 and m['joint_error'] <= 1e-8
           and m['max_speed'] <= MAX_JOINT_SPEED + 1e-9
           and m['max_acceleration'] <= MAX_JOINT_ACCEL + 1e-9
@@ -593,143 +594,21 @@ def report(direction, kf, tables, log):
     return ok
 
 
-# ═══════════════════════════════════════════════════════════════════════
-#  ROS 2 NODE
-# ═══════════════════════════════════════════════════════════════════════
-class QuasiStaticWalker(Node):
-
-    def __init__(self):
-        super().__init__('quasi_static_walker')
-        self.pub = self.create_publisher(Float64MultiArray, '/position_controller/commands', 10)
-        self.create_subscription(String, '/walk_cmd', self.walk_cmd_cb, 10)
-
-        self.get_logger().info(f'Model: {MODEL_PATH}; mass {TOTAL_MASS:.6f} kg, zero height {ZERO_HEIGHT*1000:.2f} mm')
-        self.get_logger().info('Pre-computing gait tables ...')
-        self.keyframes, self.tables = {}, {}
-        for d in ('forward', 'backward'):
-            self.keyframes[d], self.tables[d] = build_tables(d)
-            if SELF_CHECK and not report(d, self.keyframes[d], self.tables[d], self.get_logger().info):
-                raise ValueError(f'{d} gait failed the geometry/balance check')
-
-        self.neutral = np.zeros(12)
-        self.state = 'idle'              # idle | walking
-        self.direction = 'forward'
-        self.stop_req = False
-        self._dwell_until = None
-        self.cur = self.nxt = None
-        self.table = None
-        self.T = 1.0
-        self.t0 = 0.0
-
-        self.create_timer(1.0 / PUBLISH_RATE, self._tick)
-        self.get_logger().info("Ready.  ros2 topic pub --once /walk_cmd std_msgs/msg/String \"{data: 'start'}\"")
-
-    # ---- commands --------------------------------------------------------
-    def walk_cmd_cb(self, msg):
-        cmd = msg.data.strip().lower()
-        if cmd in ('start', 'forward', 'backward'):
-            d = 'backward' if cmd == 'backward' else 'forward'
-            if self.state == 'idle':
-                start = np.array([self.keyframes[d]['neutral'][n] for n in JOINT_ORDER])
-                if not np.allclose(start, self.neutral, atol=1e-8):
-                    # A stop leaves the feet in their current stride. Build the next
-                    # startup from that stance instead of resetting both planted feet.
-                    try:
-                        kf, tables = build_tables(d, self.neutral)
-                        if SELF_CHECK and not report(d, kf, tables, self.get_logger().info):
-                            raise ValueError('restart gait failed the geometry/balance check')
-                    except ValueError as exc:
-                        self.get_logger().error(f'Cannot start: {exc}')
-                        return
-                    self.keyframes[d], self.tables[d] = kf, tables
-                self.direction, self.stop_req = d, False
-                self.state = 'walking'
-                self.t0 = self._now()
-                self._begin('neutral', 'ready')
-                self.get_logger().info(f'Walking {d}.')
-            elif d != self.direction:
-                self.get_logger().warn('Already walking the other way: send `stop`, wait until it stands, then retry.')
-            else:
-                self.stop_req = False        # cancels a pending stop
-        elif cmd == 'stop':
-            if self.state == 'walking':
-                self.stop_req = True
-                self.get_logger().info('Stop requested: finishing the step, then standing.')
-        else:
-            self.get_logger().warn(f"Unknown command '{cmd}'. Use start / forward / backward / stop.")
-
-    # ---- segment handling ------------------------------------------------
-    def _now(self):
-        return self.get_clock().now().nanoseconds * 1e-9
-
-    def _begin(self, a, b):
-        self.cur, self.nxt = a, b
-        self.T = segment_duration(b, self.tables[self.direction][(a, b)])
-        self.table = self.tables[self.direction][(a, b)]
-        self.get_logger().info(f'  {a} -> {b}  ({self.T:.1f} s)')
-
-    def _advance(self):
-        arrived = self.nxt
-        # Do not skip physical phases to catch up after a delayed timer callback.
-        self.t0 = self._now()
-        if arrived == 'neutral':
-            self.neutral = self.table[-1].copy()
-            self.state = 'idle'
-            self.get_logger().info('Standing.')
-            return
-        nxt = 'neutral' if (self.stop_req and arrived in SAFE_STOP) else NEXT[arrived]
-        if arrived in DWELL_TIME:
-            # A timed settle, not a measurement of ground contact or balance.
-            self._dwell_until = self.t0 + DWELL_TIME[arrived] * TIME_SCALE
-        else:
-            self._begin(arrived, nxt)
-
-    def _tick(self):
-        if self.state == 'idle':
-            pose = self.neutral
-        elif self._dwell_until is not None:
-            pose = self.table[-1]
-            if self._now() >= self._dwell_until:
-                arrived = self.nxt
-                # Evaluate stop now: a command received during the settle must count.
-                nxt = 'neutral' if self.stop_req and arrived in SAFE_STOP else NEXT[arrived]
-                self._dwell_until = None
-                self.t0 = self._now()
-                self._begin(arrived, nxt)
-        else:
-            t = (self._now() - self.t0) / self.T
-            if t >= 1.0:
-                pose = self.table[-1]
-                self._advance()
-            else:
-                pose = table_pose(self.table, t)
-        msg = Float64MultiArray()
-        msg.data = pose.tolist()  # already checked; clipping would spoil coordinated feet
-        self.pub.publish(msg)
-
-
 def main(args=None):
-    if '--check' in sys.argv:                  # offline self-check, no ROS needed
-        print(f'Model: {MODEL_PATH}\nMass: {TOTAL_MASS:.6f} kg; zero height: {ZERO_HEIGHT*1000:.3f} mm; '
-              f'centre height: {CENTER_HEIGHT*1000:.3f} mm; single-support height: {BODY_HEIGHT*1000:.3f} mm')
-        ok = True
-        for d in ('forward', 'backward'):
-            kf, tab = build_tables(d)
-            ok &= report(d, kf, tab, print)
-        sys.exit(0 if ok else 1)
-    if not HAVE_ROS:
-        sys.exit('ROS 2 Python packages not found: source your ROS 2 / workspace setup.bash first.')
-    rclpy.init(args=args)
-    node = None
-    try:
-        node = QuasiStaticWalker()
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        if node is not None:
-            node.destroy_node()
-        rclpy.shutdown()
+    # Geometry constants/default helper calls above retain the legacy model API
+    # used by biped_cpg/biped_balance. The executable uses the new smaller-lean
+    # profile and IMU controller; there is no legacy open-loop ROS publisher.
+    if '--check' in sys.argv:
+        if __package__ in (None, ''):
+            from pathlib import Path
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from biped_gait.feedback_walk import Plans
+        plans = Plans()
+        for direction, plan in plans.cache.items():
+            print(direction, plan.metrics)
+        return
+    from biped_gait.walking_node import main as run
+    return run(args)
 
 
 if __name__ == '__main__':

@@ -1,41 +1,125 @@
-# How this quasi-static walker works
+# Quasi-static walking with IMU feedback
 
-This node makes the robot shift its weight, lift one foot, move it, put it down,
-and repeat. It uses the updated robot description to calculate the joint angles.
-**It does not read an IMU, servo feedback, or foot-contact sensors.**
+This executable now uses IMU feedback, a smaller planned lean, and guarded slow
+landing. **Only `biped_gait` was changed.** CPG, the servo bridge, the URDF, and the
+separate balance package are unchanged. The unresolved communication/status-read
+issues in the bridge are not fixed or bypassed by adding IMU feedback.
 
-The main code is [quasi_static_walk.py](biped_gait/quasi_static_walk.py).
-[robot_model.py](biped_gait/robot_model.py) reads the robot measurements from
-[robot.urdf.xacro](../robotv2_description/urdf/robot.urdf.xacro) and its foot meshes.
-Other packages and the URDF are not changed by this gait update.
+Your hardware results showed two failures: falling during the large lean and a
+foot pushing the ground during placement. The changes address them separately:
 
-This guide explains the numbers in the current code. Some numbers describe the
-robot; others are deliberately slow, small motion choices. Keeping that
-separation matters: a step length cannot be calculated from mass alone.
+| Behaviour | Previous executable | Updated executable |
+|---|---|---|
+| Planned sideways body lean | 11.46° | **4.58°** |
+| Lowering for sideways reach | 40 mm | **28 mm** |
+| Up/down change in weight transfer | 20 mm | **8 mm** |
+| Actual posture feedback | None | Roll/pitch and gyro feedback, **±1.5° correction** |
+| Lift | 8 mm before swing | **6 mm first, increasing to 10 mm during swing** |
+| Placement | Timed descent | **At most 2 mm/s planned descent**, with IMU/encoder guards |
+| Progress to the next phase | Timed holds | Minimum dwell plus measured posture/tracking settling |
+| Commands before start | Repeated zero targets | **None** |
 
-## 1. The basic idea: move the weight before lifting a foot
+The executable entry remains `quasi_static_walk`. Its ROS interface is in
+[walking_node.py](biped_gait/walking_node.py), the controller in
+[feedback_walk.py](biped_gait/feedback_walk.py), and active settings in
+[config/walk.yaml](config/walk.yaml). Geometry/IK helpers remain in
+[quasi_static_walk.py](biped_gait/quasi_static_walk.py).
 
-Think about standing on one foot. Your weight must be above that foot, rather
-than above the gap between your feet.
+Some helper constants and calls retain the older defaults for compatibility
+with packages that import the pure math, including CPG. **Those legacy defaults
+do not set this node's lean.** The executable explicitly passes the new profile
+and validates it before enabling its command timer. The old open-loop ROS node
+has been removed; `--check` also checks the new profile.
 
-We call the average position of all the robot's mass its **centre of mass**, or
-**CoM**. Imagine a vertical line going down from that point to the floor.
+## Run after your existing robot bringup
 
-- With two feet down, that line should land inside the area joining both soles.
-- With one foot up, it should land inside the sole that is still down.
-- Being just inside an edge leaves little room for errors. The new plan aims at
-  the centre of the supporting sole while one foot is up.
+Build from the workspace root, then source the installation in each terminal:
 
-“Quasi-static” means moving slowly enough that checking the weight position is
-useful. Moving slowly reduces the extra forces caused by speeding up and slowing
-down. It does not fix a weight position that is outside the supporting area.
+```bash
+cd /external_storage/manasa/biped
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-up-to biped_gait \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3
+source install/setup.bash
+```
 
-The supporting area is called the **support polygon**: imagine stretching a
-rubber band around the floor-contact corners. The static and moving cases are
-explained in [MIT's notes on legged robots](https://underactuated.mit.edu/humanoids.html).
-The checks here are model checks; they do not measure actual contact or balance.
+Start your usual `biped_bringup` with its walker disabled (do not pass
+`walk:=true`). Keep the IMU enabled. Stop the CPG node and any actuator-enabled
+`biped_balance` node completely so there is one joint-command publisher.
+Monitor-only `biped_balance` can still observe/record.
 
-![Weight transfer viewed from above](assets/weight_transfer.svg)
+Then start this node separately:
+
+```bash
+ros2 launch biped_gait walk.launch.py
+# Equivalent, using default settings:
+# ros2 run biped_gait quasi_static_walk
+```
+
+Hardware mode uses monotonic computer time, fresh `/joint_states`, the existing
+`servo_bridge` diagnostics, and `/imu` in `imu_link`. It never enables torque or
+calls motor services. Wait for bringup to finish positioning near calibrated
+zero. Gyro bias is calibrated automatically from at least one second of quiet
+IMU samples before movement; this does not redefine an existing lean as upright.
+Your completed IMU direction/monitor tests do not need repeating.
+
+Use another sourced terminal:
+
+```bash
+# Optional: see corrections while both feet remain planted, inside THIS node.
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stand'}"
+# One right-foot step and return to the centred bent-knee stance:
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'step'}"
+# Continuous walking:
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'start'}"
+# Finish the airborne step and centre:
+ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stop'}"
+```
+
+Wait for `standing` before issuing another start/direction command. `backward`
+selects reverse walking. `hold` freezes the last target and latches a fault;
+`calibrate` explicitly recalibrates gyro bias while stationary. No automatic
+walking occurs at launch. Start requires the measured joints near calibrated
+zero, or the last held nominal CPG-free stance, and approximately stationary.
+A small synchronized approach captures the measured starting pose first.
+If a new path must be calculated from a stopped stance, calculation runs in a
+background worker while sensor checks and current stance commands continue.
+`preparing_path` in status shows this wait; `stop` cancels the request.
+
+```bash
+ros2 topic echo /walk/status --once
+```
+
+Status includes planned/measured lean, correction, the joint with largest
+tracking error, predicted swing clearance, and a **latched first-fault snapshot**.
+The snapshot stores phase, joint targets/measurements, IMU tilt, landing cues,
+source ages and bridge diagnostics. `hardware_ready` reports current input readiness; it does
+not clear a latched fault. Support the robot and restart from a known stance
+after a fault. Hold is not fall recovery and does not turn torque off.
+
+The following cases block or stop movement: missing/stale IMU or encoder data,
+bridge health errors, torque OFF/startup positioning, a competing command
+publisher, excessive tilt, persistent motor lag, or an infeasible feedback pose.
+The bridge can still republish cached encoder values with fresh stamps; this
+node cannot prove that every physical status read was fresh.
+
+For simulation use `ros2 launch biped_gait walk.launch.py sim:=true`, with a
+simulator publishing `/clock`, `/imu` and `/joint_states`, and its other walker
+disabled. Simulation mode does not require physical bridge diagnostics. The
+reported physics results below are MuJoCo results; Gazebo was not run here.
+
+## Why the robot still needs to move its weight
+
+Imagine a vertical line from the average position of the robot's mass to the
+floor. With one foot up, that line needs to lie inside the supporting sole.
+This is a static model check, not a measurement of actual ground forces.
+The new target is **8 mm inward from the sole centre**, reducing the body travel
+needed compared with the previous sole-centred target. It leaves about 10.49 mm
+of sideways support margin in the current model.
+
+The following basic calculations describe the URDF. They are separate from the
+chosen motion settings and cannot establish that the model matches the real
+assembled robot.
 
 ## 2. Units and directions
 
@@ -263,258 +347,133 @@ Adding the body height puts that CoM about `179.9087 mm` above the floor. During
 walking, both legs move and the body leans, so the code recalculates the sum at
 every planned pose. The mass of the lifted leg still counts.
 
-## 6. Choose reachable body positions and short steps
+## 6. Where the smaller lean and heights come from
 
-The old script used `0.178136 × sin(0.38) = 66.074 mm` of sideways body travel.
-That fixed shift does not follow from the new mass distribution. The new node
-solves body X and Y from the desired whole-robot CoM position instead.
-
-An upright body cannot reach a sole-centred CoM throughout this gait without
-exceeding a hip-roll limit or running out of leg reach. The new plan therefore
-leans the body toward the supporting foot and lowers it for the sideways reach.
-The feet themselves stay level and point forward.
-
-| Code setting | Value | How it was obtained / why it is used |
-|---|---:|---|
-| `ZERO_HEIGHT` | 273.882675 mm | Sum of joint Z offsets and the mesh-derived sole offset |
-| `CENTER_HEIGHT` | 253.882675 mm | Zero height minus a chosen 20 mm knee bend allowance |
-| `CROUCH_DEPTH` | 40 mm | Chosen after checking reach and limits through both complete gait directions |
-| `BODY_HEIGHT` | 233.882675 mm | Zero height minus `CROUCH_DEPTH`, used in single support |
-| `BODY_ROLL` | 0.20 rad = 11.46° | Planned lean that makes both complete paths reachable with the lower stance |
-| Forward `STEP_LENGTH` | 20 mm | Small initial landing distance ahead of the other foot |
-| Backward `STEP_LENGTH` | 16 mm | Smaller distance in the reverse direction, which has different reach limits |
-| `SWING_CLEARANCE` | 8 mm | Small whole-sole lift for a level floor; checked against reach and joint limits |
-| `LIMIT_MARGIN` | 0.02 rad = 1.15° | Keep commanded joints inside the URDF limits |
-| Minimum walking knee bend | 0.12 rad = 6.88° | Reject almost straight knees after the initial lowering |
-| `MIN_SUPPORT_MARGIN` | 10 mm | Reject a planned weight projection too close to the supporting edge |
-
-The last several entries are **motion choices**, not exact physical facts or
-a mathematical guarantee that these are the best possible values. Candidate
-stances with less lowering/lean failed reach or limit checks in parts of the
-full path. The chosen pair passes startup, both gait directions, landings,
-transfers, and stopping. Changing one number requires checking the whole path.
-
-The body rises toward `CENTER_HEIGHT` in the middle of a transfer between feet.
-That keeps the ankle pitch within its limits when both legs are under the body.
-It lowers again as it moves toward the next supporting foot.
-
-For a transfer from one full lean to the opposite full lean, with progress `s`
-from 0 to 1:
+The zero-angle body height is 273.882675 mm. The active profile uses:
 
 ```text
-extra height = (CENTER_HEIGHT - BODY_HEIGHT) × 16 × s² × (1 - s)²
+centred body height = 273.882675 - 20 = 253.882675 mm
+single-support body height = 273.882675 - 28 = 245.882675 mm
+planned lean = 0.08 radians = 4.58 degrees
 ```
 
-This is zero at the start/end and equals the 20 mm height difference halfway
-through. Initial lowering and stopping use a smooth change between their
-endpoint heights instead.
+These 20/28 mm and 4.58° values are chosen motion settings checked against the
+whole path, rather than quantities determined by mass alone. A lower initial
+lift of 6 mm avoids an ankle-limit violation at the trailing foot. Clearance
+increases to 10 mm as that foot advances. The supporting foot remains anchored;
+all six joints are solved together to keep the soles level and pointing forward.
 
-## 7. Solve the weight position and joint angles together
-
-For each small part of a phase:
-
-1. Set where both soles should be in a common floor-based coordinate system.
-2. Set the desired body height and sideways lean.
-3. Set the desired whole-robot CoM X and Y.
-4. Guess the body X and Y and solve the leg angles for those foot positions.
-5. Calculate the CoM from all the parts at those angles.
-6. Compare that result with the desired CoM. Move the guessed body X/Y a little
-   and solve again until the error is small.
-
-When one foot is up, desired CoM X/Y equals the supporting sole's centre.
-During a weight transfer it moves smoothly from one sole centre to the other.
-When standing centred it lies halfway between the two sole centres.
-
-An example from the initial left support, in floor-based coordinates:
+The narrower sole is about 36.977978 mm wide. At its centre the sideways margin
+would be `36.977978 / 2 = 18.488989 mm`. Moving the desired CoM 8 mm inward gives:
 
 ```text
-Desired CoM X/Y = left sole centre = [15.155819, 54.744723] mm
-Planned body roll = -0.20 rad
-Planned body height = 233.882675 mm
-
-Solved body position ≈ [9.7893, 91.7320, 233.8827] mm
-Calculated whole-robot CoM ≈ [15.1558, 54.7447, 154.3937] mm
+nominal support margin = 18.488989 - 8 = 10.488989 mm
 ```
 
-The body origin is not the CoM. Shifting it by 54.7 mm would not automatically
-put the whole robot's mass over the left sole. Also, as the right leg lifts and
-swings, the body position changes slightly to keep the *total* mass centred.
+With both feet planted, the body rises toward the centred height during transfer
+and lowers again for sideways reach. Both planted feet keep their spacing.
+The body X/Y position is solved repeatedly from the full mass sum, including the
+raised leg. The body origin itself is not the centre of mass.
 
-**Inverse kinematics**, or IK, means finding joint angles that put a foot where
-we want it. This node solves all six leg joints together, including foot angle.
-It calculates how a tiny change in each joint moves/turns the foot. That small
-response table is called a **Jacobian**. It uses that table to reduce the foot
-position and angle errors, then repeats.
+## 7. How IMU corrections work
 
-No infeasible joint angle is clipped to a limit. Clipping one joint alone would
-spoil the coordinated foot position. A failed solve stops gait construction.
-The knees stay on the bent-knee branch of the solution.
+The tilt estimator is copied from the hardware-checked `biped_balance` utility.
+It can use a valid orientation quaternion, or fuse a six-axis accelerometer and
+gyroscope with a complementary filter. `imu_mount_rpy` rotates the sensor into
+the robot's body axes. Gyro rates are radians/second; accelerometer readings
+include gravity, approximately 9.81 m/s² at rest. Source stamps and frame IDs are
+checked. Invalid or stale IMU input never silently switches to open-loop walking.
 
-Because the body leans, a foot that is level in the room has the opposite tilt
-when viewed from the body. The code accounts for this before solving the legs.
-Hip yaw can be nonzero even though the foot points forward: it cancels the
-combined turning effect of the other joints, including ankle roll then pitch.
-
-## 8. Check how much room is left before tipping
-
-For a rectangular supporting foot, measure the CoM projection's distance to all
-four edges. The smallest distance is the **static support margin**.
-
-At the centre of the right sole:
+For each roll/pitch direction:
 
 ```text
-distance to front/back edge = 90.000000 / 2 = 45.000000 mm
-distance to sideways edge   = 36.977978 / 2 = 18.488989 mm
-
-margin = smaller of those distances = 18.488989 mm
+tilt error = measured tilt - planned tilt
+requested correction = -0.30 * tilt error
+                       -0.04 * (measured gyro rate - planned rotation rate)
 ```
 
-The left sole gives `37.075159 / 2 = 18.537580 mm`. Thus about **18.49 mm** is the
-largest sideways margin available at the centre of the narrower sole.
+The same principle of gyro-based hip/ankle balance is used in
+[ROBOTIS walking controllers](https://emanual.robotis.com/docs/en/popup/op3_WalkingParam.msg/).
+The gains here are conservative initial settings, not tuned physical-robot gains.
 
-The full-path checks give about **18.49 mm minimum** in either direction,
-including transfers and interpolation between calculated poses. The node
-requires at least 10 mm. It also checks that the single-support CoM is within
-0.2 mm of the planned sole centre.
+For example, suppose the planned left lean is -4.58° but the body has leaned
+left to -6°. The error is -1.42°, so the proportional term requests +0.426° of
+body correction, reducing the extra left lean. It does **not** try to cancel the
+entire planned lean and hold zero degrees during a weight transfer.
 
-These very small calculation errors are software tolerances, not claims about
-physical accuracy. Servo encoder steps, joint play, flexible parts and incorrect
-mass/foot measurements can produce much larger errors on the real robot.
+Corrections are capped at ±1.5° and changed gradually. Authority fades near a
+straight knee, where fixed-foot attitude changes become difficult. Correction
+authority is halved during landing. A measured absolute torso tilt over 8°
+freezes the last valid target instead of continuing the planned motion.
 
-## 9. One walking cycle
+The correction is converted into coordinated hip, knee and ankle targets. For
+a small body rotation `R`, each nominal relative foot pose becomes `R.T * pose`.
+In plain terms: turn the body while keeping both intended foot positions fixed
+in the room. This works for a leaning nominal pose too. No individual joint
+angle is clipped to hide an unreachable correction; the entire progress/correction
+is reduced together. Complete joint updates are limited to 0.25 rad/s.
 
-| Phase | What moves | Where the weight target is |
-|---|---|---|
-| `ready` | Lower and centre the body; both feet stay planted | Halfway between soles |
-| `lean_left` | Shift/lean body left and lower for sideways reach | Left sole centre |
-| `lift_right_1st` / `lift_right` | Raise the right sole 8 mm | Left sole centre |
-| `swing_right` | Move the raised right foot to its next X position | Left sole centre |
-| `place_right` | Lower right foot vertically and wait | Left sole centre |
-| `lean_right` | Move weight to the newly placed right foot | Right sole centre |
-| `lift_left` | Raise the left sole 8 mm | Right sole centre |
-| `swing_left` | Move the raised left foot to its next X position | Right sole centre |
-| `place_left` | Lower left foot vertically and wait | Right sole centre |
-| `lean_left_cycle` | Move weight to the newly placed left foot | Left sole centre |
+## 8. Landing: limiting the push, without pretending to measure pressure
 
-“20 mm step length” means the newly landed foot is 20 mm ahead of the other
-foot. After the first step, a foot moves about 40 mm from its old position to its
-next position. The backward equivalents are 16 mm and 32 mm.
+A position-controlled servo keeps trying to reach its target after early ground
+contact. IMU feedback alone cannot measure that contact or the downward force.
+The controller therefore adds several limits **in addition** to posture feedback:
 
-A planted foot keeps its floor position while the body moves. Two planted feet
-keep their spacing. Landing changes the swing foot's height without sliding it
-along the floor. Waiting after a landing is a timed pause, not contact detection.
+- Planned descent speed is at most **2 mm/s**. Lowering 10 mm takes at least
+  9.375 seconds with the smooth start/stop curve, because its peak speed is
+  `1.875 * height / duration`.
+- The nominal trajectory ends at the assumed floor plane. There is no extra
+  downward search stroke or forced knee straightening after placement.
+- During placement, a tilt error over **1.5°**, horizontal gyro rate over
+  **0.12 rad/s**, or joint tracking error over **0.035 rad** immediately holds
+  the last valid target and latches a landing fault.
+- Relative foot height is estimated using **measured IMU tilt and encoder angles**.
+  An estimated swing-sole penetration over **1 mm** relative to the supporting
+  sole blocks further descent.
+- Near the ground (estimated clearance below 2 mm), a swing sole tilted more than
+  **2°** also interrupts descent. This catches some heel/toe-first contacts that
+  a body-tilt check alone can miss.
+- Before lifting the next foot, body motion and joint tracking must settle.
+  The measured-pose mass model must also retain at least 5 mm supporting margin.
+  Otherwise the next lift is blocked.
 
-`stop` finishes an airborne step, then centres and straightens the body to the
-bent-knee standing stance. It holds the feet where they landed. Restart builds
-new tables from that held stance. Change direction while stopped.
+A trip is reported as **contact NOT confirmed**. The node does not automatically
+resume, lower the foot farther, declare touchdown, or switch support after that
+fault. It keeps the last valid target where inputs remain healthy; stale input
+or a bridge fault suppresses output so the existing bridge watchdog takes over.
 
-## 10. Move slowly, without sharp changes in joint speed
+These checks can miss early contact without appreciable tilt/tracking/height
+cues, and are affected by sensor/model error. They do **not** guarantee that the
+foot cannot press the ground. `contact_measured` remains `false` in status.
+Normal successful placement still assumes contact on a level floor; there are
+no pressure or force sensors. Physical validation with support remains necessary.
 
-Each phase has a progress value `u` from 0 to 1. The planned foot/weight motion
-uses:
+## 9. Phases and timing
+
+The sequence remains quasi-static: lower/centre, transfer left, lift right, swing
+right, place right, transfer right, lift left, swing left, place left, repeat.
+Stop finishes an airborne step and centres with the feet where they landed.
+Each phase uses a smooth progress curve:
 
 ```text
-s = 10u³ - 15u⁴ + 6u⁵
+s = 10*u^3 - 15*u^4 + 6*u^5       (u goes from 0 to 1)
 ```
 
-For example, `u = 0` gives `s = 0`, `u = 0.5` gives `s = 0.5`, and `u = 1` gives
-`s = 1`. This curve begins and ends with zero planned speed and acceleration.
+This starts/stops the planned Cartesian path gently. There are 81 solved joint
+poses per phase. Cubic interpolation joins them with continuous joint velocity.
+Nominal timing respects 0.18 rad/s and 0.30 rad/s², with slower landing added.
+The full feedback command also respects the 0.25 rad/s joint-update limit.
 
-The node calculates 81 joint poses per phase (`TABLE_SAMPLES = 80` intervals).
-Between them it uses short cubic curves with continuous joint speed and zero
-speed at phase endpoints. The checks use those same curves, including points
-between the saved rows. They do not check only a few poses and assume the rest.
+A phase waits at least its settling dwell, then requires quiet body rotation,
+posture error within 1.5°, and tracking error below 0.03 rad for 0.4 seconds.
+Failure to settle blocks the next phase. General servo lag above 0.04 rad pauses
+progress; lag lasting over two seconds or error over 0.15 rad latches a fault.
+Those safeguards are not loosened to hide the unresolved hardware lag issue.
+Landing uses the tighter immediate 0.035 rad check described above.
 
-Timing has two parts:
+## 10. Verification and limitations
 
-- `SEGMENT_TIME × TIME_SCALE` gives a slow minimum duration. `TIME_SCALE = 1.5`.
-- A phase is lengthened further if any joint would exceed `0.18 rad/s` or
-  `0.30 rad/s²`. The maxima are calculated from the cubic curves, including
-  peaks between table rows.
-
-If a curve is spread over twice as much time, its speed halves and its
-acceleration becomes one quarter. The duration calculation is:
-
-```text
-T = largest of:
-    minimum phase duration
-    peak joint speed for a 1-second phase / 0.18
-    square root of (peak joint acceleration for a 1-second phase / 0.30)
-```
-
-`0.18 rad/s` is about `10.31 degrees/s`, below the existing hardware bridge's
-`0.35 rad/s` soft-start speed. Commands publish at 50 Hz, once every 0.020 s.
-At the maximum planned speed, a normal update changes an angle by no more than
-`0.18 × 0.020 = 0.0036 rad`, about `0.206 degrees`.
-
-Examples for a fresh forward start, excluding the following pause:
-
-| Motion | Calculated time |
-|---|---:|
-| Initial lowering to `ready` | about 17.00 s |
-| Initial left weight transfer | about 7.46 s |
-| First right lift | 3.00 s |
-| First right swing | 3.75 s |
-| Right placement | 4.50 s |
-| First rightward weight transfer | about 13.39 s |
-
-This is deliberately slow walking. Ready holds for 1.2 s; weight-transfer holds
-for 1.5 s; landings hold for 1.8 s, after applying `TIME_SCALE`. These are motion
-settings, not values derived from robot mass.
-
-## 11. What is checked before commands start
-
-The node builds both forward and backward paths before starting its command
-timer. It refuses failed paths. The checks include:
-
-- CoM projection inside the intended supporting area, with at least 10 mm margin.
-- CoM near the supporting sole's centre during lift, swing, and landing.
-- Both soles level and pointing in the same forward direction.
-- Planted soles on the same floor, and no swing-sole penetration.
-- Fixed spacing between planted feet during transfers and stops.
-- The intended 8 mm full lift, bent knees, and joint limits with the 0.02 rad buffer.
-- Joint speed and acceleration limits for the actual interpolation curves.
-
-The supporting leg is selected from the phase, not guessed from which foot is
-lowest. Otherwise a foot going through the floor could hide a planner error.
-The current numerical floor/spacing errors are below 0.001 mm in the rigid model.
-
-## 12. Verification and its limits
-
-The regression tests independently read the URDF and calculate part positions
-and the CoM. They check the scaled STL contact corners, foot constraints, motion
-limits, phase boundaries, stop/restart, direction changes, and rejected bad paths.
-They also verify that future mass and mesh-scale edits are read automatically.
-
-Optional MuJoCo tests use the **updated URDF**, the existing simulator, a 50 Hz
-command rate, and `torque_fraction = 0.5`, matching the bridge's configured
-500/1000 torque limit. At assumed stiffness 50 N·m/rad they complete six landings
-forward and six backward, then stop with the body upright. Separate runs at
-100 N·m/rad also completed six landings in each direction. No IMU or measured
-joint positions are used to adjust any of these commands.
-
-In the six-landing runs before stopping, the greatest torso tilt was about 12.1°,
-including the deliberately planned 11.46° lean. Peak simulated motor effort was
-about 0.84 N·m. These depend on the simulator's assumed servo, voltage, friction,
-rotor inertia and ground contact; they are not hardware measurements or a
-continuous-torque rating for ST3215 motors.
-
-The description package's README currently says its inertials come from a CAD
-mass model while its meshes were restored, and that articulated alignment has
-not been validated. This walker uses the **current URDF and collision meshes**;
-it cannot establish that those files match the actual assembled robot. In
-particular, the 90 mm × roughly 37 mm contact soles and 273.883 mm zero-angle
-base height above are model results to compare with the real robot.
-
-No hardware walking test has been performed for this update. Without feedback,
-this node cannot detect a late servo, slipping foot, early landing, or unexpected
-body tilt, and it cannot recover from a fall. Correct dimensions and a valid
-static plan improve the starting point; they do not guarantee physical walking.
-
-## 13. Check, build and run
-
-From the workspace source directory, run checks without starting ROS nodes or
-connecting to the robot:
+Run offline checks without connecting to the robot:
 
 ```bash
 cd /external_storage/manasa/biped/src
@@ -522,51 +481,34 @@ python3 -B biped_gait/biped_gait/quasi_static_walk.py --check
 python3 -B -m unittest discover -s biped_gait/test -v
 ```
 
-The two physics tests skip if the optional `mujoco`/`xacro` Python modules are
-unavailable. The other tests need NumPy and run without ROS. The model reader
-prints which URDF it uses. A sourced installation takes priority over the source
-fallback, so check that printed path when comparing results.
+The tests independently read the URDF and scaled STL corners, check the new
+profile's complete interpolated paths, verify feedback directions and fixed
+world-foot poses, speed/correction limits, missing sensor handling, first-fault
+snapshots, single-step stopping, and interrupted landing cues. Optional physics
+tests require MuJoCo and xacro.
 
-Build both the updated description and its gait dependency together:
+All 25 gait tests pass, together with 16 unchanged CPG compatibility tests.
+One physics case places a 4 mm raised patch beneath the swing toe just before
+the first descent: the controller interrupts placement and retains its last
+target rather than completing that landing. This checks one early-contact case,
+not every possible ground contact.
 
-```bash
-cd /external_storage/manasa/biped
-source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install --packages-up-to biped_gait
-source install/setup.bash
-```
+The tested MuJoCo model uses the current URDF, 50 Hz control, assumed servo
+stiffness 50 N·m/rad, and 50% of its assumed stall torque. With actual simulated
+IMU and encoder inputs, the controller completes three landings in each direction
+and stops. Peak tilt is about 4.94°. In a standing 3 N / 0.1 s forward-push test,
+feedback reduces peak tilt from about 4.19° to 3.75° and the integrated squared
+tilt from 3.23 to 2.81 degree²·seconds. These are simulation results, not hardware
+gain validation or a torque rating.
 
-Use the normal hardware bringup with its walker disabled, and leave the IMU out
-of this experiment (`walk:=false imu:=false` on `biped_bringup hardware.launch.py`).
-That launch currently defaults to enabling torque and moving to its startup
-pose; have the robot supported and ready for that motion. Let startup finish.
-Do not run `biped_balance` in actuator mode or another walker alongside this node.
-The walking node initially publishes the zero-angle pose, so it expects the
-robot to be in its calibrated zero/startup stance when first launched.
+An isolated ROS test with generated hardware feedback verifies automatic quiet
+calibration, powered-stand command flow, corrective direction, continued commands
+and sensor callbacks during a background path rebuild, and output suppression
+after IMU loss. No real servo bus is opened by those tests.
 
-Run the walker in a sourced terminal:
-
-```bash
-ros2 launch biped_gait walk.launch.py
-```
-
-Then in another sourced terminal:
-
-```bash
-ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'start'}"
-# To finish the airborne step, centre the body, and hold:
-ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'stop'}"
-# Once stopped, to walk the other way:
-ros2 topic pub --once /walk_cmd std_msgs/msg/String "{data: 'backward'}"
-```
-
-Use support against a fall for the first hardware run. The first new things to
-validate are this plan's lower stance and 11.46° weight-transfer lean, followed by
-one lift and landing. Send `stop` during a lift/swing to finish that step and
-centre. A stop sent before the first lift can return to centre without stepping.
-`stop` is a planned finish, not an immediate emergency stop.
-
-For simulation, use `ros2 launch biped_gait walk.launch.py sim:=true`.
-The same joint order and `/position_controller/commands` topic are retained.
-The old `docs/walking_math_explained.md` describes a previous version; this README
-is the explanation of the current URDF-based planner.
+The description package still notes that its CAD mass model and restored meshes
+have not had articulated alignment validated. This controller cannot establish
+that geometry matches the assembled robot, detect every cached driver sample,
+or measure contact forces. The reported hardware communication/status-read
+problem still needs its own investigation. CPG is unchanged; IMU integration
+into CPG is deferred until that issue is resolved.

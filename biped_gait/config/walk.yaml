@@ -1,0 +1,33 @@
+# Active quasi-static settings; IMU feedback is required.
+quasi_static_walker:
+  ros__parameters:
+    body_roll: 0.08
+    crouch: 0.028
+    centre_crouch: 0.02
+    com_inset: 0.008
+    clearance: 0.01
+    lift_clearance: 0.006
+    kp: 0.3
+    kd: 0.04
+    max_correction: 0.026179938779914945
+    correction_rate: 0.05
+    max_joint_speed: 0.25
+    landing_speed: 0.002
+    landing_tilt_error: 0.026179938779914945
+    landing_rotation_rate: 0.12
+    landing_tracking_error: 0.035
+    landing_sole_tilt: 0.03490658503988659
+    penetration_tolerance: 0.001
+    fault_tilt: 0.13962634015954636
+    tracking_pause: 0.04
+    tracking_fault: 0.15
+    tracking_timeout: 2.0
+    settle_error: 0.026179938779914945
+    settle_timeout: 4.0
+    settle_duration: 0.4
+    imu_source: auto
+    imu_frame: imu_link
+    imu_mount_rpy:
+    - 0.0
+    - 0.0
+    - 0.0
