@@ -24,6 +24,8 @@ quasi_static_walker:
     landing_alignment_clearance: 0.004
     landing_xy_speed: 0.003
     landing_xy_tolerance: 0.001
+    placement_ramp_time: 1.0
+    placement_capture_acceleration: 0.3
     transfer_error: 0.02181661564992912
     transfer_rate: 0.1
     transfer_lookahead: 0.25

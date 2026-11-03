@@ -84,6 +84,7 @@ class QuasiStaticWalker(Node):
     def joints(self, message):
         try:
             self.controller.feedback.joints(message.name, message.position, message.velocity, self.now(), self.age(message.header))
+            self.controller.joint_source_time = message.header.stamp.sec+message.header.stamp.nanosec*1e-9
         except ValueError as error:
             self.warn(error)
 

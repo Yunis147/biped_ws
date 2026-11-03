@@ -45,13 +45,52 @@ class PlacementTests(unittest.TestCase):
         angles = tilt(reference_rotation(measured))
         p = Placement(commanded, angles, 'l', plans().settings)
         target, descent, done, _ = p.target(commanded, measured, angles, .02)
-        self.assertTrue(done)
+        self.assertFalse(done)
         self.assertEqual(descent, 0.)
+        self.assertLess(np.max(np.abs(target-commanded)),1e-4)
+        previous=commanded.copy();velocity=np.zeros(12)
+        for _ in range(400):
+            target,descent,done,_=p.target(previous,measured,angles,.02)
+            next_velocity=(target-previous)/.02
+            self.assertLessEqual(np.max(np.abs(next_velocity-velocity))/.02,plans().settings.placement_capture_acceleration+.002)
+            self.assertGreaterEqual(ground_estimate(target,angles,'l').clearance,-1e-6)
+            p.accept(descent);previous=target.copy();velocity=next_velocity
+            if done:break
+        self.assertTrue(done)
         self.assertAlmostEqual(ground_estimate(target, angles, 'l').clearance, 0., places=6)
         self.assertLess(abs(target[NAMES.index('r_knee_joint')]-measured[NAMES.index('r_knee_joint')]), 1e-5)
         # Once captured, a changing encoder sample cannot make targets chase gravity.
         later = measured.copy(); later[NAMES.index('r_knee_joint')] -= .005
         np.testing.assert_array_equal(p.target(target, later, angles, .02)[0], target)
+
+    def test_placement_entry_ramps_and_rejected_trials_do_not_advance_the_ramp(self):
+        q=self.row('swing_right');angles=tilt(reference_rotation(q))
+        p=Placement(q,angles,'l',plans().settings)
+        first,descent,_,_=p.target(q,q,angles,.02)
+        repeated=p.target(q,q,angles,.02)[0]
+        np.testing.assert_array_equal(first,repeated)
+        self.assertLess(descent,.01*plans().settings.landing_speed*.02)
+        for _ in range(60):
+            target,descent,_,_=p.target(q,q,angles,.02)
+            p.accept(descent)
+        self.assertAlmostEqual(descent,plans().settings.landing_speed*.02)
+
+    def test_placement_and_settling_use_the_same_feedback_strength(self):
+        c=controller();q=self.row('swing_right')
+        c.nominal=q.copy();c.commanded=q.copy();c.state='moving';c.support='l'
+        c.segment=('swing_right','place_right');c.last_time=1.
+        angles=tilt(reference_rotation(q))+[.001,0.]
+        feed(c,1.02,angles=angles)
+        c.placement=Placement(q,angles,'l',c.s)
+        c.placement.motion_time=2.
+        c.tick(1.02)
+        during=c.correction.copy()
+        c=controller();c.nominal=q.copy();c.commanded=q.copy();c.state='settling'
+        c.support='l';c.segment=('swing_right','place_right');c.last_time=1.
+        feed(c,1.02,angles=angles)
+        c.placement=Placement(q,angles,'l',c.s)
+        c.tick(1.02)
+        np.testing.assert_allclose(during,c.correction,atol=1e-8)
 
     def test_a_nonmoving_leg_cannot_consume_an_unbounded_downward_search(self):
         measured = self.row('swing_right'); target = measured.copy()

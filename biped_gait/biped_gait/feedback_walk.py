@@ -39,6 +39,8 @@ class Settings:
     landing_alignment_clearance: float = .004
     landing_xy_speed: float = .003
     landing_xy_tolerance: float = .001
+    placement_ramp_time: float = 1.
+    placement_capture_acceleration: float = .30
     transfer_error: float = math.radians(1.25)
     transfer_rate: float = .10
     transfer_lookahead: float = .25
@@ -73,6 +75,8 @@ class Settings:
                 or self.landing_xy_tolerance > .002 or self.placement_tolerance > .0005
                 or self.minimum_knee_bend < .12):
             raise ValueError('placement settings exceed the experimental bounds')
+        if not .5 <= self.placement_ramp_time <= 2. or self.placement_capture_acceleration > .30:
+            raise ValueError('invalid placement smoothing settings')
 
     def profile(self):
         return {name: getattr(self, name) for name in ('body_roll', 'crouch', 'centre_crouch', 'com_inset', 'support_margin', 'clearance', 'lift_clearance')}
@@ -186,6 +190,9 @@ class WalkingController:
         self.support = 'l'
         self.phase_geometry = None
         self.target_problem = ''
+        self.interruption_snapshot = None
+        self.capture_correction = None
+        self.joint_source_time = None
 
     def readiness(self, now):
         if getattr(self, 'imu_problem', ''):
@@ -262,6 +269,7 @@ class WalkingController:
         self.landings = 0
         self.interruption = ''
         self.reason = 'arming'
+        self.interruption_snapshot = None
 
     def _begin(self, a, b):
         self.segment, self.state = (a, b), 'moving'
@@ -275,11 +283,23 @@ class WalkingController:
             self.fail(str(exc), self.last_time or 0.)
             return
         self.placement = None
+        self.capture_correction = None
         if b.startswith('place_'):
             self.placement = Placement(self.feedback.q, self.imu.angles, m.STANCE[b], self.s,
                                        reference_goal=self.plan.tables[(a,b)][-1])
 
     def _placement_hold(self, reason, now):
+        if self.interruption_snapshot is None:
+            self.interruption_snapshot = dict(time=now, segment=self.segment, reason=reason,
+                roll_pitch_deg=np.degrees(self.imu.angles).tolist(), gyro_rad_s=self.imu.gyro.tolist(),
+                tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
+                measured=self.feedback.q.tolist(), target=self.commanded.tolist(),
+                clearance_m=self.clearance, landing_cues=dict(self.landing_cues),
+                placement_elapsed_s=self.elapsed, aligning=self.placement.aligning,
+                capturing=self.placement.touch_target is not None,
+                xy_error_m=self.placement.xy_error, imu_source_time=self.imu.sample_time,
+                joint_source_time=self.joint_source_time,
+                sensor_skew_s=None if self.joint_source_time is None or self.imu.sample_time is None else self.imu.sample_time-self.joint_source_time)
         self.interruption = reason+'; contact NOT confirmed; support robot before restarting'
         self.reason = self.interruption
         self.state = 'placement_hold'
@@ -290,15 +310,20 @@ class WalkingController:
 
     def _placing(self, dt, now, error):
         self.reason = 'placing from measured bent-leg geometry'
+        bend = min(-self.nominal[NAMES.index(side+'_knee_joint')] for side in 'rl')
+        authority = float(np.clip((bend-.20)/.30,0.,1.))
         requested = np.clip(-self.s.kp*error-self.s.kd*self.imu.gyro[:2],
-                            -self.s.max_correction/2, self.s.max_correction/2)
+                            -self.s.max_correction, self.s.max_correction)*authority*.5
         for scale in (1., .5, .25, .125):
             correction = self.correction+np.clip(requested-self.correction,
-                -self.s.correction_rate*dt, self.s.correction_rate*dt)*scale
+                -self.s.correction_rate*dt, self.s.correction_rate*dt)*scale*self.placement.ramp_gain(dt*scale)
             try:
                 base, descent, done, exhausted = self.placement.target(
                     self.commanded, self.feedback.q, self.imu.angles, dt*scale)
-                delta = rpy_matrix(*self.correction).T @ rpy_matrix(*correction)
+                if self.placement.touch_target is not None and self.capture_correction is None:
+                    self.capture_correction = self.correction.copy()
+                reference_correction = self.correction if self.capture_correction is None else self.capture_correction
+                delta = rpy_matrix(*reference_correction).T @ rpy_matrix(*correction)
                 candidate = attitude_pose_matrix(base, delta)
                 if np.max(np.abs(candidate-self.commanded)) > self.s.max_joint_speed*dt+1e-7:
                     if done:
@@ -310,6 +335,7 @@ class WalkingController:
                         continue
                 self.placement.accept(descent)
                 self.commanded, self.correction = candidate, correction
+                self.requested = requested.copy()
                 self.nominal = attitude_pose_matrix(candidate, rpy_matrix(*correction).T)
                 self.elapsed += dt*scale
                 self.pause_since = None
@@ -319,7 +345,7 @@ class WalkingController:
                     # The following phase will keep the landed sole at measured
                     # ground height; it does not finish an old nominal extension.
                     self.state, self.waited, self.settled = 'settling', 0., 0.
-                elif self.elapsed > self.plan.durations[self.segment]+self.s.settle_timeout:
+                elif self.elapsed > self.plan.durations[self.segment]+self.s.settle_timeout+self.s.placement_ramp_time+self.placement.capture_duration:
                     self._placement_hold('measured placement height budget exhausted', now)
                 return self.commanded.copy()
             except ValueError as exc:
@@ -467,6 +493,10 @@ class WalkingController:
                 self.fail('body/servos did not settle; next phase blocked', now)
         if self.fault:
             return self.commanded.copy()
+        if not landing and self.state == 'moving' and self.segment[1].startswith('place_'):
+            # _advance entered placement in this tick. Its first motion belongs
+            # to the ramped placement controller, not the generic table branch.
+            return self.commanded.copy()
         # Backtrack the complete nominal progress AND attitude correction, never
         # clip separate joint angles. Hold if no synchronized candidate is feasible.
         for scale in (1., .5, .25, .125, 0.):
@@ -546,4 +576,5 @@ class WalkingController:
             tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
             predicted_swing_clearance_m=self.clearance, landings=self.landings,
             contact_measured=False, imu_source=self.imu.used_source, placement=placement,
-            interruption=self.interruption, transfer_backoffs=self.backoffs, target_problem=self.target_problem)
+            interruption=self.interruption, interruption_snapshot=self.interruption_snapshot,
+            transfer_backoffs=self.backoffs, target_problem=self.target_problem)

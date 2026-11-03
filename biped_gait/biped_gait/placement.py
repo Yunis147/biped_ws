@@ -93,6 +93,39 @@ class Placement:
         rotation = m._foot_transform(reference, stance)[0].T
         self.xy_offset = (rotation @ (m._sole_center(reference,g.swing)-m._sole_center(reference,stance)))[:2]
         self.xy_error = 0.
+        self.motion_time = 0.
+        self.trial_dt = 0.
+        self.capture_elapsed = 0.
+        self.capture_duration = 0.
+        self.capture_start = None
+        self.capture_ground = None
+
+    def _capture_pose(self, dt):
+        u = min(1., (self.capture_elapsed+dt)/self.capture_duration)
+        pose = self.capture_start+m._smoothstep(u)*(self.touch_target-self.capture_start)
+        return self.above_plane(pose,self.capture_ground), 0., u >= 1., False
+
+    def ramp_gain(self, dt):
+        return m._smoothstep(min(1.,(self.motion_time+dt)/self.s.placement_ramp_time))
+
+    def above_plane(self, candidate, ground=None):
+        """Keep interpolation above its specified supporting-foot plane.
+
+        Capture freezes that plane together with the measured pose; repeatedly
+        chasing a changing loaded-leg measurement would recreate extension.
+        """
+        g = self.last if ground is None else ground
+        q = dict(zip(NAMES,candidate))
+        _, feet = m._com_and_feet(q)
+        height = float((feet[g.swing] @ g.rotation.T)[:,2].min()-g.plane_z)
+        if height >= self.s.landing_clearance-1e-7:
+            return np.asarray(candidate).copy()
+        position = m._sole_center(q,g.swing)+g.rotation.T @ np.array([0.,0.,self.s.landing_clearance-height])
+        q = m._leg_pose_ik(q,g.swing,position,m._foot_transform(q,g.swing)[0])
+        target = np.array([q[n] for n in NAMES])
+        if -target[NAMES.index(g.swing+'_knee_joint')] < self.s.minimum_knee_bend:
+            raise ValueError('floor projection would straighten the swing knee too far')
+        return target
 
     def target(self, commanded, measured, angles, dt):
         """Lower at most speed*dt from the CURRENT command toward measured ground.
@@ -101,6 +134,7 @@ class Placement:
         A finite entry-height budget prevents an indefinite downward search.
         """
         g = self.last = ground_estimate(measured, angles, self.stance)
+        self.trial_dt = dt
         q = dict(zip(NAMES, commanded))
         actual = dict(zip(NAMES, measured))
         stance_position = g.rotation @ m._sole_center(actual,g.stance)
@@ -116,7 +150,7 @@ class Placement:
             self.remaining = max(0., g.clearance-self.s.landing_clearance)
             self.descent_start_clearance = g.clearance
         if self.touch_target is not None:
-            return self.touch_target.copy(), 0., True, False
+            return self._capture_pose(dt)
         if g.clearance <= self.s.landing_clearance+self.s.placement_tolerance:
             if self.xy_error > self.s.landing_xy_tolerance:
                 raise ValueError('foot reached the estimated floor before horizontal alignment')
@@ -135,22 +169,31 @@ class Placement:
             if -target[NAMES.index(g.swing+'_knee_joint')] < self.s.minimum_knee_bend:
                 raise ValueError('measured placement knee is too straight')
             self.touch_target = target.copy()
-            return target, 0., True, False
+            self.capture_start = np.array(commanded).copy()
+            self.capture_ground = g
+            distance = float(np.max(np.abs(target-commanded)))
+            self.capture_duration = max(.4, 1.875*distance/self.s.max_joint_speed,
+                                        np.sqrt(5.774*distance/self.s.placement_capture_acceleration))
+            return self._capture_pose(dt)
         _, feet = m._com_and_feet(q)
         current = float((feet[g.swing] @ g.rotation.T)[:, 2].min()-g.plane_z)
         if current < -self.s.penetration_tolerance:
             raise ValueError('existing swing target is below the measured support plane')
+        # Enter the online alignment without a full-speed Cartesian step. The
+        # ramp advances only after the whole candidate is accepted by the caller.
+        gain = self.ramp_gain(dt)
+        motion_dt = dt*gain
         if self.aligning:
             descent = 0.
             next_clearance = max(self.s.landing_clearance, current+float(np.clip(self.alignment_height-current,
-                -self.s.landing_speed*dt,self.s.landing_speed*dt)))
+                -self.s.landing_speed*motion_dt,self.s.landing_speed*motion_dt)))
         else:
-            descent = min(self.s.landing_speed*dt, self.remaining,
+            descent = min(self.s.landing_speed*motion_dt, self.remaining,
                           max(0., current-self.s.landing_clearance))
             next_clearance = max(self.s.landing_clearance, current-descent)
         position = g.rotation @ m._sole_center(q, g.swing)
         delta_xy = xy_goal-position[:2]
-        position[:2] += delta_xy*min(1.,self.s.landing_xy_speed*dt/max(float(np.linalg.norm(delta_xy)),1e-9))
+        position[:2] += delta_xy*min(1.,self.s.landing_xy_speed*motion_dt/max(float(np.linalg.norm(delta_xy)),1e-9))
         # Approach level gradually. Requiring the entire measured tilt error to
         # disappear in one tick would defeat the joint speed limit.
         world_rotation = g.rotation @ m._foot_transform(q, g.swing)[0]
@@ -161,7 +204,7 @@ class Placement:
         if angle > 1e-8:
             axis = np.array([difference[2,1]-difference[1,2], difference[0,2]-difference[2,0],
                              difference[1,0]-difference[0,1]])/(2*np.sin(angle))
-            world_rotation = m._rot(axis, min(angle, self.s.max_joint_speed*dt*.25)) @ world_rotation
+            world_rotation = m._rot(axis, min(angle, self.s.max_joint_speed*motion_dt*.25)) @ world_rotation
         poly = np.asarray(m.SOLE[g.swing]['poly'])
         offsets = np.column_stack((poly-poly.mean(axis=0), np.zeros(len(poly))))
         corner_offset = float((offsets @ world_rotation.T)[:, 2].min())
@@ -180,6 +223,9 @@ class Placement:
         return target, descent, done, exhausted
 
     def accept(self, descent):
+        self.motion_time += self.trial_dt
+        if self.touch_target is not None:
+            self.capture_elapsed = min(self.capture_duration,self.capture_elapsed+self.trial_dt)
         self.remaining = max(0., self.remaining-descent)
         self.commanded_descent += descent
 

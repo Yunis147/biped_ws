@@ -125,6 +125,14 @@ class FeedbackTests(unittest.TestCase):
             self.assertEqual(self.c.state, 'placement_hold')
             self.assertIn('landing interrupted', self.c.interruption)
             self.assertEqual(self.c.landings, 0)
+            if symptom == 'rate':
+                snapshot=self.c.interruption_snapshot
+                self.assertAlmostEqual(snapshot['gyro_rad_s'][0],.13)
+                self.now += .02
+                feed(self.c,self.now)
+                self.c.tick(self.now)
+                self.assertIs(self.c.interruption_snapshot,snapshot)
+                self.assertAlmostEqual(snapshot['gyro_rad_s'][0],.13)
 
     def test_landing_stops_on_predicted_ground_mismatch(self):
         held = self.landing(.9)

@@ -386,6 +386,24 @@ Placement works in these stages:
    The body path is adapted smoothly while planted feet keep their positions.
    There is no joint-space blend back to an obsolete leg length.
 
+Online placement enters its horizontal, vertical, foot-level and feedback
+correction motion with a one-second smooth ramp. It does not jump straight to
+the full alignment speeds after the swing hold. Capturing the measured stance
+also uses a smooth transition rather than an immediate joint-target replacement.
+For that base capture curve, duration is at least:
+
+```text
+sqrt(5.774 * largest joint-angle change / 0.30)
+```
+
+The 0.30 value is the nominal joint acceleration in rad/s². The duration also
+respects the joint-speed limit and is at least 0.4 seconds. Posture feedback and
+geometric floor corrections remain additional bounded control actions, so this
+formula is not a claim that every final feedback command has that acceleration.
+The capture plane and target are fixed once observed; new encoder deflection
+does not start another downward extension. Placement and subsequent settling
+use the same half-strength feedback, avoiding a gain change at touchdown.
+
 The inverse leg calculation finds the hip, knee and ankle angles needed for the
 sole target. The swing knee must retain at least 0.12 rad = 6.88° of bend; an
 unreachable target is refused, not clipped into a straight leg. No calculated
@@ -484,6 +502,10 @@ tracking joint, transfer-backoff count, interruption reason and placement data:
 measured body height, entry clearance, remaining downward budget and alignment
 error. `hardware_ready` describes current input health; it does not clear a
 latched interruption/fault. `contact_measured` always remains `false`.
+`interruption_snapshot` freezes the first placement interruption, including gyro
+rates, measured and commanded joints, alignment/capture stage, clearance and
+IMU/joint-state source-time skew. Record it before restarting; current healthy
+readings do not explain a transient that has already passed.
 
 Run offline checks without opening a servo bus:
 
@@ -499,12 +521,17 @@ to standing. Peak torso tilt is about 3.92° forward and 3.83° backward. A rais
 patch test interrupts placement and checks bounded relief with active feedback.
 These are simulation results, not identified hardware gains or torque ratings.
 
-All 46 gait tests pass. A 3 N sideways pulse for 0.1 seconds during double-support
+All 48 gait tests pass. A 3 N sideways pulse for 0.1 seconds during double-support
 transfer triggers an early return to standing with no foot lift; peak tilt in
 that test is about 2.57°. This checks one recoverable disturbance, not every fall.
 An actual ROS/MuJoCo launch also completes a step and centred stop, with no idle
 commands. Precomputed startup reaches ready input status in about 1.15 seconds
 on the development machine; the largest command gap in that run is about 28 ms.
+With a deliberately added 25 ms processing delay during placement, a ROS/MuJoCo
+step and centred stop also pass. A separate uneven-timing comparison reduces
+peak placement rotation from about 0.088 to 0.031 rad/s with the new transitions;
+the landing rotation limit remains 0.12 rad/s. These checks do not establish
+the cause of every real-time or graphical-simulation interruption.
 
 The source description still notes that its mass/mesh articulated alignment has
 not been physically validated. The walker cannot measure force, detect every
