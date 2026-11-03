@@ -384,6 +384,14 @@ the robot's body axes. Gyro rates are radians/second; accelerometer readings
 include gravity, approximately 9.81 m/s² at rest. Source stamps and frame IDs are
 checked. Invalid or stale IMU input never silently switches to open-loop walking.
 
+The filter measures the gap between samples using each IMU message's own
+timestamp. Several samples may arrive before the next simulation `/clock`
+update, so giving every sample the current `/clock` value can falsely report
+"IMU timestamps must increase". Receipt time is tracked separately for freshness
+and quiet calibration. On hardware it uses monotonic computer time, while IMU
+source stamps are checked against ROS time. Stale, repeated or backwards source
+stamps are still rejected; this fix does not disable those checks.
+
 For each roll/pitch direction:
 
 ```text
@@ -487,7 +495,8 @@ world-foot poses, speed/correction limits, missing sensor handling, first-fault
 snapshots, single-step stopping, and interrupted landing cues. Optional physics
 tests require MuJoCo and xacro.
 
-All 25 gait tests pass, together with 16 unchanged CPG compatibility tests.
+All 34 gait tests pass, including nine timestamp regression tests. The earlier
+16 CPG compatibility tests also passed; CPG is unchanged by this fix.
 One physics case places a 4 mm raised patch beneath the swing toe just before
 the first descent: the controller interrupts placement and retains its last
 target rather than completing that landing. This checks one early-contact case,
@@ -505,6 +514,11 @@ An isolated ROS test with generated hardware feedback verifies automatic quiet
 calibration, powered-stand command flow, corrective direction, continued commands
 and sensor callbacks during a background path rebuild, and output suppression
 after IMU loss. No real servo bus is opened by those tests.
+
+A ROS/MuJoCo regression also deliberately sends `/imu` at 100 Hz while `/clock`
+updates at 50 Hz. With source timestamps used for filtering, a complete step and
+return to standing pass without a fault; peak torso tilt is about 4.75°. The
+different rates exercise valid samples sharing the same current ROS clock value.
 
 The description package still notes that its CAD mass model and restored meshes
 have not had articulated alignment validated. This controller cannot establish

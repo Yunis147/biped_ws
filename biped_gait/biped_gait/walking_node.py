@@ -71,8 +71,10 @@ class QuasiStaticWalker(Node):
             if message.angular_velocity_covariance[0] < 0 or message.linear_acceleration_covariance[0] < 0:
                 raise ValueError('IMU gyro and accelerometer required')
             g, a, q = message.angular_velocity, message.linear_acceleration, message.orientation
+            sample_time = message.header.stamp.sec+message.header.stamp.nanosec*1e-9
             self.controller.imu.update([g.x, g.y, g.z], [a.x, a.y, a.z], [q.x, q.y, q.z, q.w],
-                self.now(), orientation_valid=message.orientation_covariance[0] >= 0)
+                self.now(), orientation_valid=message.orientation_covariance[0] >= 0,
+                sample_time=sample_time)
             self.controller.imu_problem = ''
         except ValueError as error:
             self.controller.imu_problem = str(error)

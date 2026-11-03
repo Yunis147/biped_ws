@@ -45,23 +45,30 @@ class TiltEstimator:
         self.gyro = np.zeros(3)
         self.bias = np.zeros(3)
         self.accel_norm = 0.
+        # Receipt time is used for freshness and quiet calibration. Sensor time
+        # is used for integration; several callbacks can share one /clock tick.
         self.time = None
+        self.sample_time = None
         self.used_source = 'waiting'
         self.calibrated = False
         self.history = deque(maxlen=500)
 
-    def update(self, gyro, accel, quaternion, now, orientation_valid=True):
+    def update(self, gyro, accel, quaternion, now, orientation_valid=True, *, sample_time=None):
+        sample_time = now if sample_time is None else sample_time
         gyro, accel = np.asarray(gyro, float), np.asarray(accel, float)
         if (gyro.shape != (3,) or accel.shape != (3,) or not math.isfinite(now)
+                or not math.isfinite(sample_time)
                 or not np.all(np.isfinite(gyro)) or not np.all(np.isfinite(accel))):
             raise ValueError('invalid IMU sample')
         gyro, accel = self.mount @ gyro, self.mount @ accel
         if np.linalg.norm(gyro) > 20:
             raise ValueError('implausible gyro rate; expected rad/s')
-        dt = None if self.time is None else now - self.time
+        if self.time is not None and now < self.time:
+            raise ValueError('IMU receipt clock moved backwards')
+        dt = None if self.sample_time is None else sample_time - self.sample_time
         if dt is not None and dt <= 0:
-            raise ValueError('IMU timestamps must increase')
-        if dt is not None and dt > .25:
+            raise ValueError('IMU source timestamps must increase')
+        if (dt is not None and dt > .25) or (self.time is not None and now-self.time > .25):
             self.calibrated = False
             self.angles = None
             self.history.clear()
@@ -104,6 +111,7 @@ class TiltEstimator:
             rotation, used_source = rpy_matrix(*angles), 'raw complementary'
         self.angles, self.rotation = angles, rotation
         self.gyro, self.accel_norm, self.time = gyro - self.bias, norm, now
+        self.sample_time = sample_time
         self.used_source = used_source
         self.history.append((now, gyro.copy(), angles.copy(), norm))
 
