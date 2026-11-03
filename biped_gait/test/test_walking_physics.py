@@ -21,7 +21,7 @@ class WalkingPhysicsTests(unittest.TestCase):
             p.write_text((cls.package/'urdf/robot.urdf.xacro').read_text().replace('$(find robotv2_description)', str(cls.package)))
             cls.urdf = xacro.process_file(str(p), mappings={'use_sim': 'false'}).toxml()
 
-    def run_case(self, direction='forward', push=False, gain=True, obstacle=False):
+    def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False):
         import mujoco
         from test_feedback import controller
         from biped_gait.feedback_walk import NAMES
@@ -50,6 +50,8 @@ class WalkingPhysicsTests(unittest.TestCase):
         started = stopped = pushed = patch_placed = False
         finished = standing = None
         peak = integral = 0.
+        start_x = float(sim.base_pose()[0][0])
+        lift_heights = {'r':0.,'l':0.}
         for i in range(int(260/.002)):
             if i%10 == 0:
                 now = sim.time
@@ -59,7 +61,12 @@ class WalkingPhysicsTests(unittest.TestCase):
                 if now>=2 and not started:
                     c.command('stand' if push else direction, now)
                     started = True
-                if not push and not obstacle and c.landings>=3 and not stopped:
+                if transfer_push and not pushed and c.segment == ('ready','lean_left') and c.elapsed > c.plan.durations[c.segment]*.4:
+                    sim.push([0.,3.,0.],.1)
+                    pushed = True
+                if transfer_push and c.backoffs and c.state == 'standing':
+                    stopped = True
+                if not push and not obstacle and not transfer_push and c.landings>=3 and not stopped:
                     c.command('stop', now)
                     stopped = True
                 if obstacle and not patch_placed and c.segment == ('swing_right', 'place_right'):
@@ -72,11 +79,17 @@ class WalkingPhysicsTests(unittest.TestCase):
                     mujoco.mj_forward(sim.model, sim.data)
                     patch_placed = True
                 target = c.tick(now)
+                if c.segment and c.segment[1] in ('swing_right','swing_left'):
+                    from biped_gait.placement import ground_estimate
+                    stance = 'l' if c.segment[1] == 'swing_right' else 'r'
+                    g = ground_estimate(sim.joint_positions(),c.imu.angles,stance)
+                    lift_heights[g.swing] = max(lift_heights[g.swing],g.clearance)
                 if target is not None:
                     sim.set_targets(target)
-                if c.fault:
+                if c.fault or c.state == 'placement_hold':
                     if obstacle:
-                        self.assertIn('landing interrupted', c.fault)
+                        self.assertEqual(c.state,'placement_hold',c.fault)
+                        self.assertIn('landing interrupted', c.interruption)
                         held = c.commanded.copy()
                         for j in range(100):
                             sim.step()
@@ -84,8 +97,12 @@ class WalkingPhysicsTests(unittest.TestCase):
                                 q,g,a = sim.imu()
                                 c.imu.update(g,a,q,sim.time)
                                 c.feedback.joints(NAMES,sim.joint_positions(),sim.joint_velocities(),sim.time)
-                                np.testing.assert_array_equal(c.tick(sim.time), held)
-                        return dict(fault=c.fault, peak=peak, landings=c.landings)
+                                next_target=c.tick(sim.time)
+                                self.assertIsNotNone(next_target)
+                                self.assertFalse(c.fault,c.fault)
+                                self.assertLessEqual(np.max(np.abs(next_target-held)),c.s.max_joint_speed*.02+1e-7)
+                                held=next_target.copy()
+                        return dict(interruption=c.interruption, peak=peak, landings=c.landings)
                     self.fail(str(c.status(now)))
                 if c.state == 'standing':
                     if standing is None:
@@ -106,10 +123,17 @@ class WalkingPhysicsTests(unittest.TestCase):
                 break
         if obstacle:
             self.fail('raised-ground descent was not interrupted')
-        if not push:
+        if transfer_push:
+            self.assertGreaterEqual(c.backoffs,1)
+            self.assertEqual(c.landings,0)
+            self.assertEqual(c.state,'standing')
+        elif not push:
             self.assertEqual(c.landings,3)
             self.assertEqual(c.state,'standing')
             self.assertLess(peak, 6.5)
+            sign = 1 if direction == 'forward' else -1
+            self.assertGreater(sign*(float(sim.base_pose()[0][0])-start_x),.015)
+            self.assertGreater(min(lift_heights.values()),.001)
         print('PHYSICS',direction,'push',push,'feedback',gain,'peak',peak,'integral',integral,'landings',c.landings,flush=True)
         return dict(peak=peak, integral=integral)
 
@@ -127,3 +151,6 @@ class WalkingPhysicsTests(unittest.TestCase):
     def test_early_ground_stops_descent_instead_of_completing_the_step(self):
         result = self.run_case(obstacle=True)
         self.assertEqual(result['landings'],0)
+
+    def test_lateral_disturbance_during_transfer_returns_to_standing(self):
+        self.run_case(transfer_push=True)

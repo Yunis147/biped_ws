@@ -9,18 +9,20 @@ import numpy as np
 from . import quasi_static_walk as m
 from .imu import TiltEstimator, rpy_matrix, tilt
 from .servo_feedback import ServoFeedback
+from .placement import Placement, PhaseGeometry
 
 NAMES = m.JOINT_ORDER
 
 
 @dataclass(frozen=True)
 class Settings:
-    body_roll: float = .08
-    crouch: float = .028
-    centre_crouch: float = .020
-    com_inset: float = .008
-    clearance: float = .010
-    lift_clearance: float = .006
+    body_roll: float = .06
+    crouch: float = .026
+    centre_crouch: float = .018
+    com_inset: float = .010
+    support_margin: float = .008
+    clearance: float = .006
+    lift_clearance: float = .004
     kp: float = .30
     kd: float = .04
     max_correction: float = math.radians(1.5)
@@ -31,6 +33,15 @@ class Settings:
     landing_rotation_rate: float = .12
     landing_tracking_error: float = .035
     landing_sole_tilt: float = math.radians(2.)
+    landing_clearance: float = 0.
+    placement_tolerance: float = .0003
+    minimum_knee_bend: float = .12
+    landing_alignment_clearance: float = .004
+    landing_xy_speed: float = .003
+    landing_xy_tolerance: float = .001
+    transfer_error: float = math.radians(1.25)
+    transfer_rate: float = .10
+    transfer_lookahead: float = .25
     penetration_tolerance: float = .001
     fault_tilt: float = math.radians(8)
     tracking_pause: float = .04
@@ -41,7 +52,8 @@ class Settings:
     settle_duration: float = .4
 
     def __post_init__(self):
-        if any(not math.isfinite(v) or v <= 0 for v in asdict(self).values()):
+        if any(not math.isfinite(v) or (v < 0 if k == 'landing_clearance' else v <= 0)
+               for k, v in asdict(self).items()):
             raise ValueError('walking settings must be finite and positive')
         if self.body_roll > .10 or self.max_correction > math.radians(1.5):
             raise ValueError('lean is limited to 5.73 deg and correction to 1.5 deg')
@@ -55,16 +67,36 @@ class Settings:
             raise ValueError('invalid tracking thresholds')
         if self.body_roll+self.max_correction >= self.fault_tilt:
             raise ValueError('fault tilt must leave room for planned lean plus feedback')
+        if not .006 <= self.support_margin <= .010 or self.landing_clearance > .001:
+            raise ValueError('invalid support margin/placement clearance')
+        if (self.landing_alignment_clearance > self.clearance or self.landing_xy_speed > .005
+                or self.landing_xy_tolerance > .002 or self.placement_tolerance > .0005
+                or self.minimum_knee_bend < .12):
+            raise ValueError('placement settings exceed the experimental bounds')
 
     def profile(self):
-        return {name: getattr(self, name) for name in ('body_roll', 'crouch', 'centre_crouch', 'com_inset', 'clearance', 'lift_clearance')}
+        return {name: getattr(self, name) for name in ('body_roll', 'crouch', 'centre_crouch', 'com_inset', 'support_margin', 'clearance', 'lift_clearance')}
 
 
 class Plan:
     def __init__(self, direction, initial, settings):
         self.profile = settings.profile()
         self.initial = np.asarray(initial).copy()
-        self.keyframes, self.tables = m.build_tables(direction, initial, self.profile)
+        rotation = reference_rotation(self.initial)
+        template_initial = (self.initial.copy() if np.linalg.norm(rotation-np.eye(3)) < 1e-8
+                            else attitude_pose_matrix(self.initial, rotation.T))
+        template_q = dict(zip(NAMES,template_initial))
+        heights = [m._sole_center(template_q,s)[2] for s in 'rl']
+        if abs(heights[0]-heights[1]) > .001:
+            raise ValueError('stopped soles differ by over 1 mm; support robot and restart from known stance')
+        if abs(heights[0]-heights[1]) > 1e-6:
+            # Only the offline template is levelled. PhaseGeometry keeps the
+            # actual landed anchors when the node resumes this cached motion.
+            for side in 'rl':
+                target=m._sole_center(template_q,side);target[2]=float(np.mean(heights))
+                template_q=m._leg_pose_ik(template_q,side,target,np.eye(3))
+            template_initial=np.array([template_q[n] for n in NAMES])
+        self.keyframes, self.tables = m.build_tables(direction, template_initial, self.profile)
         if not m.report(direction, self.keyframes, self.tables, lambda msg: None, self.profile):
             raise ValueError('small-lean gait failed geometry checks')
         self.metrics = m.gait_metrics(self.keyframes, self.tables, self.profile)
@@ -78,9 +110,13 @@ class Plan:
 
 
 class Plans:
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, *, precomputed=False):
         self.settings = settings or Settings()
-        self.cache = {d: Plan(d, np.zeros(12), self.settings) for d in ('forward', 'backward')}
+        if precomputed:
+            from .plan_store import load
+            self.cache = {d: load(self.settings, d, np.zeros(12)) for d in ('forward', 'backward')}
+        else:
+            self.cache = {d: Plan(d, np.zeros(12), self.settings) for d in ('forward', 'backward')}
 
     def get(self, direction, initial):
         if not np.allclose(self.cache[direction].initial, initial, atol=1e-10, rtol=0):
@@ -88,8 +124,8 @@ class Plans:
         return self.cache[direction]
 
 
-def reference_rotation(q):
-    return m._foot_transform(dict(zip(NAMES, q)), 'l')[0].T
+def reference_rotation(q, stance='l'):
+    return m._foot_transform(dict(zip(NAMES, q)), stance)[0].T
 
 
 def attitude_pose(nominal, correction):
@@ -98,10 +134,13 @@ def attitude_pose(nominal, correction):
     R_new_body = R_nominal_body @ R_correction. The relative foot target becomes
     R_correction.T @ its original pose. This also works for a leaning nominal body.
     """
-    q = dict(zip(NAMES, nominal))
     if np.max(np.abs(correction)) < 1e-10:
         return np.array(nominal).copy()
-    rotation = rpy_matrix(*correction)
+    return attitude_pose_matrix(nominal, rpy_matrix(*correction))
+
+
+def attitude_pose_matrix(nominal, rotation):
+    q = dict(zip(NAMES, nominal))
     for side in 'rl':
         original_r, _ = m._foot_transform(dict(zip(NAMES, nominal)), side)
         target = rotation.T @ m._sole_center(dict(zip(NAMES, nominal)), side)
@@ -140,6 +179,13 @@ class WalkingController:
         self.arming_since = None
         self.pause_since = None
         self.resync = False
+        self.placement = None
+        self.interruption = ''
+        self.backoffs = 0
+        self.relief_target = None
+        self.support = 'l'
+        self.phase_geometry = None
+        self.target_problem = ''
 
     def readiness(self, now):
         if getattr(self, 'imu_problem', ''):
@@ -214,11 +260,75 @@ class WalkingController:
         self.stop_requested = False
         self.single_step, self.stand_only = text == 'step', text == 'stand'
         self.landings = 0
+        self.interruption = ''
+        self.reason = 'arming'
 
     def _begin(self, a, b):
         self.segment, self.state = (a, b), 'moving'
         self.clearance, self.landing_cues = None, {}
         self.elapsed = self.waited = self.settled = 0.
+        new_support = m.STANCE.get(b, self.support)
+        self.support = new_support
+        try:
+            self.phase_geometry = PhaseGeometry(self.plan.tables[(a,b)][0], self.nominal, self.support)
+        except ValueError as exc:
+            self.fail(str(exc), self.last_time or 0.)
+            return
+        self.placement = None
+        if b.startswith('place_'):
+            self.placement = Placement(self.feedback.q, self.imu.angles, m.STANCE[b], self.s,
+                                       reference_goal=self.plan.tables[(a,b)][-1])
+
+    def _placement_hold(self, reason, now):
+        self.interruption = reason+'; contact NOT confirmed; support robot before restarting'
+        self.reason = self.interruption
+        self.state = 'placement_hold'
+        try:
+            self.relief_target = self.placement.relief(self.commanded, self.feedback.q, self.imu.angles)
+        except ValueError:
+            self.fail('placement relief infeasible: '+reason, now)
+
+    def _placing(self, dt, now, error):
+        self.reason = 'placing from measured bent-leg geometry'
+        requested = np.clip(-self.s.kp*error-self.s.kd*self.imu.gyro[:2],
+                            -self.s.max_correction/2, self.s.max_correction/2)
+        for scale in (1., .5, .25, .125):
+            correction = self.correction+np.clip(requested-self.correction,
+                -self.s.correction_rate*dt, self.s.correction_rate*dt)*scale
+            try:
+                base, descent, done, exhausted = self.placement.target(
+                    self.commanded, self.feedback.q, self.imu.angles, dt*scale)
+                delta = rpy_matrix(*self.correction).T @ rpy_matrix(*correction)
+                candidate = attitude_pose_matrix(base, delta)
+                if np.max(np.abs(candidate-self.commanded)) > self.s.max_joint_speed*dt+1e-7:
+                    if done:
+                        difference = candidate-self.commanded
+                        fraction = min(1., self.s.max_joint_speed*dt/float(np.max(np.abs(difference))))
+                        candidate = self.commanded+fraction*difference
+                        done = False
+                    else:
+                        continue
+                self.placement.accept(descent)
+                self.commanded, self.correction = candidate, correction
+                self.nominal = attitude_pose_matrix(candidate, rpy_matrix(*correction).T)
+                self.elapsed += dt*scale
+                self.pause_since = None
+                if exhausted:
+                    self.reason = 'placement height budget reached; waiting without further descent'
+                if done:
+                    # The following phase will keep the landed sole at measured
+                    # ground height; it does not finish an old nominal extension.
+                    self.state, self.waited, self.settled = 'settling', 0., 0.
+                elif self.elapsed > self.plan.durations[self.segment]+self.s.settle_timeout:
+                    self._placement_hold('measured placement height budget exhausted', now)
+                return self.commanded.copy()
+            except ValueError as exc:
+                self._placement_hold(str(exc), now)
+                return self.commanded.copy()
+        self.pause_since = now if self.pause_since is None else self.pause_since
+        if now-self.pause_since > 1.:
+            self._placement_hold('no bounded placement target', now)
+        return self.commanded.copy()
 
     def _settled(self, error):
         return (np.max(np.abs(error)) <= self.s.settle_error and
@@ -309,10 +419,18 @@ class WalkingController:
                 elif self.elapsed > 5.:
                     self.fail('starting stance did not settle', now)
             return self.commanded.copy()
-        target_angles = tilt(reference_rotation(self.nominal))
+        target_angles = tilt(reference_rotation(self.nominal,self.support))
         error = self.imu.angles-target_angles
+        transfer = self.segment is not None and self.segment[1] in ('ready', 'lean_left', 'lean_right', 'lean_left_cycle')
+        if self.state == 'moving' and transfer:
+            predicted = error+self.s.transfer_lookahead*self.imu.gyro[:2]
+            if np.max(np.abs(predicted)) > self.s.transfer_error or np.linalg.norm(self.imu.gyro[:2]) > self.s.transfer_rate:
+                self.state = 'recovering'
+                self.stop_requested = True
+                self.backoffs += 1
+                self.interruption = 'weight transfer backed off before foot lift; posture feedback remains active'
         landing = self.segment is not None and self.segment[1].startswith('place_')
-        if landing:
+        if landing and self.state != 'placement_hold':
             stance = m.STANCE[self.segment[1]]
             _, feet = m._com_and_feet(dict(zip(NAMES, self.feedback.q)))
             R = rpy_matrix(*self.imu.angles)
@@ -332,11 +450,13 @@ class WalkingController:
             if self.clearance < .002 and sole_tilt > self.s.landing_sole_tilt:
                 self.landing_cues['near_ground_sole_tilt_deg'] = math.degrees(sole_tilt)
             if self.landing_cues:
-                self.fail('landing interrupted: '+str(self.landing_cues)+'; contact NOT confirmed', now)
+                self._placement_hold('landing interrupted: '+str(self.landing_cues), now)
                 return self.commanded.copy()
         if self.tracking_error > self.s.tracking_pause:
             return self._lag(now)
         self.lag_since = None
+        if landing and self.state == 'moving':
+            return self.commanded.copy() if dt <= 0 else self._placing(dt, now, error)
         if self.state == 'settling':
             self.waited += dt
             self.settled = self.settled+dt if self._settled(error) else 0.
@@ -350,11 +470,22 @@ class WalkingController:
         # Backtrack the complete nominal progress AND attitude correction, never
         # clip separate joint angles. Hold if no synchronized candidate is feasible.
         for scale in (1., .5, .25, .125, 0.):
-            next_elapsed = self.elapsed + (dt*scale if self.state == 'moving' else 0.)
+            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' else 0.
+            next_elapsed = max(0., self.elapsed+progress*dt*scale)
             nominal = self.nominal.copy()
-            if self.state == 'moving':
+            if self.state in ('moving', 'recovering'):
                 nominal = m.table_pose(self.plan.tables[self.segment], next_elapsed/self.plan.durations[self.segment])
-            reference = tilt(reference_rotation(nominal))
+                if self.phase_geometry is not None:
+                    try:
+                        nominal = self.phase_geometry.pose(nominal, self.nominal, next_elapsed/self.plan.durations[self.segment])
+                    except ValueError as exc:
+                        self.target_problem = str(exc)
+                        continue
+            elif self.state == 'placement_hold':
+                relief = attitude_pose_matrix(self.relief_target, rpy_matrix(*self.correction).T)
+                delta = relief-nominal
+                nominal += delta*min(1., .1*dt*scale/max(float(np.max(np.abs(delta))), 1e-9))
+            reference = tilt(reference_rotation(nominal,self.support))
             rate = (reference-target_angles)/max(dt, 1e-6)
             requested = -self.s.kp*(self.imu.angles-reference)-self.s.kd*(self.imu.gyro[:2]-rate)
             bend = min(-nominal[NAMES.index(side+'_knee_joint')] for side in 'rl')
@@ -364,13 +495,17 @@ class WalkingController:
             try:
                 candidate = attitude_pose(nominal, correction)
                 if np.max(np.abs(candidate-self.commanded)) > self.s.max_joint_speed*dt+1e-7:
+                    index = int(np.argmax(np.abs(candidate-self.commanded)))
+                    self.target_problem = f'{NAMES[index]} target step {candidate[index]-self.commanded[index]:.6f} rad exceeds {self.s.max_joint_speed*dt:.6f}'
                     continue
-            except ValueError:
+            except ValueError as exc:
+                self.target_problem = str(exc)
                 continue
             self.nominal, self.commanded = nominal, candidate
+            self.target_problem = ''
             self.correction, self.requested = correction, requested
             self.elapsed = next_elapsed
-            if scale == 0. and self.state == 'moving':
+            if scale == 0. and self.state in ('moving', 'recovering'):
                 self.pause_since = now if self.pause_since is None else self.pause_since
                 if now-self.pause_since > 2.:
                     self.fail('no feasible forward progress under feedback limits', now)
@@ -378,12 +513,15 @@ class WalkingController:
                 self.pause_since = None
             if self.state == 'moving' and self.elapsed >= self.plan.durations[self.segment]:
                 self.state, self.waited, self.settled = 'settling', 0., 0.
+            if self.state == 'recovering' and self.elapsed <= 0.:
+                self.state = 'standing' if np.max(np.abs(tilt(reference_rotation(self.nominal,self.support)))) < .001 else 'transfer_hold'
+                self.segment = None
             break
         else:
             self.pause_since = now if self.pause_since is None else self.pause_since
             if now-self.pause_since > 1.:
                 self.fail('no feasible bounded feedback target', now)
-        self.reason = self.state if not self.fault else self.fault
+        self.reason = self.fault or (self.interruption if self.interruption and self.state in ('recovering', 'placement_hold', 'transfer_hold', 'standing') else self.state)
         return self.commanded.copy()
 
     def _lag(self, now):
@@ -394,11 +532,18 @@ class WalkingController:
         return self.commanded.copy()
 
     def status(self, now):
+        placement = None if self.placement is None else dict(
+            body_height_m=self.placement.last.body_height, initial_clearance_m=self.placement.initial_clearance,
+            descent_start_clearance_m=getattr(self.placement,'descent_start_clearance',self.placement.initial_clearance),
+            measured_clearance_m=self.placement.last.clearance, remaining_descent_m=self.placement.remaining,
+            commanded_descent_m=self.placement.commanded_descent, contact_confirmed=False,
+            aligning=self.placement.aligning, xy_error_m=self.placement.xy_error)
         return dict(state=self.state, segment=self.segment, reason=self.reason, fault=self.fault,
             fault_snapshot=self.snapshot, hardware_ready=not bool(self.readiness(now)), output_suppressed=self.suppress,
             calibrated=self.imu.calibrated, roll_pitch_deg=None if self.imu.angles is None else np.degrees(self.imu.angles).tolist(),
-            planned_roll_pitch_deg=np.degrees(tilt(reference_rotation(self.nominal))).tolist(),
+            planned_roll_pitch_deg=np.degrees(tilt(reference_rotation(self.nominal,self.support))).tolist(),
             correction_deg=np.degrees(self.correction).tolist(), maximum_lean_deg=math.degrees(self.s.body_roll),
             tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
             predicted_swing_clearance_m=self.clearance, landings=self.landings,
-            contact_measured=False, imu_source=self.imu.used_source)
+            contact_measured=False, imu_source=self.imu.used_source, placement=placement,
+            interruption=self.interruption, transfer_backoffs=self.backoffs, target_problem=self.target_problem)

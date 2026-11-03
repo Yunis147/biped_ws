@@ -17,6 +17,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'biped_gait'))
 from biped_gait.robot_model import load_model
+from biped_gait.feedback_walk import Settings
 
 
 spec = importlib.util.spec_from_file_location('walker_under_test', ROOT / 'biped_gait/biped_gait/quasi_static_walk.py')
@@ -35,7 +36,7 @@ class WalkingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.robot = ET.parse(ROOT / 'robotv2_description/urdf/robot.urdf.xacro').getroot()
-        cls.profile = dict(body_roll=.08, crouch=.028, centre_crouch=.020, com_inset=.008, clearance=.010, lift_clearance=.006)
+        cls.profile = Settings().profile()
         cls.gaits = {direction: gait.build_tables(direction, profile=cls.profile) for direction in ('forward', 'backward')}
 
     def independent_fk(self, row):
@@ -148,7 +149,7 @@ class WalkingTests(unittest.TestCase):
                         for R in rotations.values():
                             np.testing.assert_allclose(rotation @ R, np.eye(3), atol=2e-6)
                         if loaded:
-                            desired = feet[loaded].mean(0)[:2] + [0, .008 if loaded == 'r' else -.008]
+                            desired = feet[loaded].mean(0)[:2] + [0, self.profile['com_inset'] if loaded == 'r' else -self.profile['com_inset']]
                             np.testing.assert_allclose(com[:2], desired, atol=2e-6)
                         points = np.concatenate([feet[s] for s in ([loaded] if loaded else 'rl')])
                         # Independently test every support-polygon edge.
@@ -156,7 +157,7 @@ class WalkingTests(unittest.TestCase):
                         for i, a in enumerate(poly):
                             edge = np.array(poly[(i + 1) % len(poly)]) - a
                             distance = np.dot(com[:2] - a, [-edge[1], edge[0]]) / np.linalg.norm(edge)
-                            self.assertGreater(distance, .010, (direction, seg))
+                            self.assertGreater(distance, self.profile['support_margin'], (direction, seg))
                         ground = points[:, 2].mean()
                         self.assertLess(np.ptp(points[:, 2]), .000002)
                         self.assertGreaterEqual(min(f[:, 2].min() for f in feet.values()), ground - .000002)
@@ -182,7 +183,7 @@ class WalkingTests(unittest.TestCase):
                 np.testing.assert_allclose(positions[:, :2], np.broadcast_to(positions[0, :2], positions[:, :2].shape), atol=1e-7)
                 self.assertTrue(np.all(np.diff(positions[:, 2]) <= 1e-7))
                 self.assertAlmostEqual(positions[-1, 2], 0., places=6)
-                self.assertAlmostEqual(positions[0, 2] - positions[-1, 2], .010, places=6)
+                self.assertAlmostEqual(positions[0, 2] - positions[-1, 2], self.profile['clearance'], places=6)
                 for leg in 'rl':
                     self.assertLess(kf[f'place_{swing}'][f'{leg}_knee_joint'], -.12)
 

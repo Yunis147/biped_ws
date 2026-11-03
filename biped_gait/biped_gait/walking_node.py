@@ -17,7 +17,8 @@ from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Imu, JointState
 from diagnostic_msgs.msg import DiagnosticArray
 from std_msgs.msg import Float64MultiArray, String
-from .feedback_walk import WalkingController, Plan, Plans, Settings
+from .feedback_walk import WalkingController, Plans, Settings
+from .plan_store import prepare
 
 
 class QuasiStaticWalker(Node):
@@ -30,8 +31,8 @@ class QuasiStaticWalker(Node):
         source = self.declare_parameter('imu_source', 'auto').value
         mount = self.declare_parameter('imu_mount_rpy', [0., 0., 0.]).value
         self.imu_frame = self.declare_parameter('imu_frame', 'imu_link').value
-        self.get_logger().info('Compiling smaller-lean quasi-static paths and checking floor/support constraints ...')
-        self.controller = WalkingController(Plans(settings), simulation=self.simulation, imu_source=source, mount=mount)
+        self.get_logger().info('Loading precomputed quasi-static paths for this robot and settings ...')
+        self.controller = WalkingController(Plans(settings, precomputed=True), simulation=self.simulation, imu_source=source, mount=mount)
         self.plan_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='walking_plan')
         self.preparation = None
         self.pub = self.create_publisher(Float64MultiArray, '/position_controller/commands', 10)
@@ -127,7 +128,7 @@ class QuasiStaticWalker(Node):
                     if not np.allclose(c.plans.cache[direction].initial, initial, atol=1e-10, rtol=0):
                         # Keep sensor callbacks and held-pose commands running while
                         # rebuilding from the stance left by a completed step.
-                        future = self.plan_worker.submit(Plan, direction, initial, c.s)
+                        future = self.plan_worker.submit(prepare, c.s, direction, initial)
                         self.preparation = (future, text, direction, initial)
                         self.get_logger().info('Preparing path; current stance feedback remains active')
                         return

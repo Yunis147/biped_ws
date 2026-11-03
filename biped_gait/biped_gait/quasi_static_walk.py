@@ -32,7 +32,7 @@ except ImportError:                      # lets `--check` run without ROS
 #  TUNING — metres, radians and seconds. Validated against the rigid robot model.
 # ═══════════════════════════════════════════════════════════════════════
 # Legacy pure-helper defaults for dependent packages. The executable uses
-# Settings in feedback_walk.py / config/walk.yaml, with 4.58-degree lean.
+# Settings in feedback_walk.py / config/walk.yaml, with the smaller lean profile.
 CROUCH_DEPTH = 0.040       # 40 mm below the zero-angle standing height
 BODY_ROLL = 0.20           # 11.46 degrees toward the supporting leg
 STEP_LENGTH = {'forward': 0.020, 'backward': 0.016}  # landing ahead of the other foot
@@ -579,7 +579,7 @@ def check_gait(direction, kf, tables):
 
 def report(direction, kf, tables, log, profile=None):
     m = gait_metrics(kf, tables, profile)
-    ok = (m['margin'] >= MIN_SUPPORT_MARGIN * 1000
+    ok = (m['margin'] >= (MIN_SUPPORT_MARGIN if profile is None else profile.get('support_margin', MIN_SUPPORT_MARGIN)) * 1000
           and m['clearance'] >= (SWING_CLEARANCE if profile is None else profile['clearance']) * 1000 - 0.1 and m['ground_error'] <= 0.2
           and m['spacing_error'] <= 0.2 and m['rotation_error'] <= 0.002 and m['joint_error'] <= 1e-8
           and m['max_speed'] <= MAX_JOINT_SPEED + 1e-9

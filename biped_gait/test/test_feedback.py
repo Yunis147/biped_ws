@@ -8,11 +8,12 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/'biped_gait'))
 from biped_gait.feedback_walk import Plans, WalkingController, attitude_pose, reference_rotation, NAMES, m
 from biped_gait.imu import tilt, rpy_matrix, TiltEstimator
+from biped_gait.placement import Placement
 
 
 @lru_cache(maxsize=1)
 def plans():
-    return Plans()
+    return Plans(precomputed=True)
 
 
 def controller(simulation=False):
@@ -67,7 +68,16 @@ class FeedbackTests(unittest.TestCase):
         self.pose('lean_left')
         self.c.tick(self.now)
         np.testing.assert_allclose(self.c.requested, 0, atol=1e-9)
-        self.assertAlmostEqual(self.c.imu.angles[0], -.08, places=6)
+        self.assertAlmostEqual(self.c.imu.angles[0], -self.c.s.body_roll, places=6)
+
+    def test_lifted_left_foot_does_not_define_body_attitude(self):
+        self.pose('swing_left')
+        self.c.support='r'
+        self.c.nominal[NAMES.index('l_ankle_roll_joint')] += .03
+        self.c.commanded=self.c.nominal.copy()
+        feed(self.c,self.now,angles=tilt(reference_rotation(self.c.nominal,'r')))
+        self.c.tick(self.now)
+        np.testing.assert_allclose(self.c.requested,0.,atol=1e-8)
 
     def test_corrections_and_complete_joint_updates_are_bounded(self):
         self.pose()
@@ -96,6 +106,7 @@ class FeedbackTests(unittest.TestCase):
         self.c.nominal = m.table_pose(self.c.plan.tables[segment], fraction)
         self.c.commanded = self.c.nominal.copy()
         feed(self.c, self.now)
+        self.c.placement = Placement(self.c.feedback.q, self.c.imu.angles, 'l', self.c.s)
         return self.c.commanded.copy()
 
     def test_landing_stops_on_tilt_rotation_or_tracking(self):
@@ -111,7 +122,8 @@ class FeedbackTests(unittest.TestCase):
                 q = held.copy(); q[0] += .04
                 feed(self.c, self.now, q=q, angles=tilt(reference_rotation(held)))
             np.testing.assert_array_equal(self.c.tick(self.now), held)
-            self.assertIn('landing interrupted', self.c.fault)
+            self.assertEqual(self.c.state, 'placement_hold')
+            self.assertIn('landing interrupted', self.c.interruption)
             self.assertEqual(self.c.landings, 0)
 
     def test_landing_stops_on_predicted_ground_mismatch(self):
@@ -120,7 +132,7 @@ class FeedbackTests(unittest.TestCase):
         feed(self.c, self.now, angles=angles)
         np.testing.assert_array_equal(self.c.tick(self.now), held)
         self.assertLess(self.c.clearance, -.001)
-        self.assertIn('contact NOT confirmed', self.c.fault)
+        self.assertIn('contact NOT confirmed', self.c.interruption)
 
     def test_nominal_landing_has_no_overtravel_and_bounded_descent(self):
         for p in plans().cache.values():
