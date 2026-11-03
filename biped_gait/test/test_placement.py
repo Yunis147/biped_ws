@@ -136,6 +136,45 @@ class PlacementTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertGreater(c.correction[0],0.)
 
+    def test_intended_rotation_does_not_trigger_a_transfer_backoff(self):
+        c=controller();seg=('place_right','lean_right')
+        c.segment=seg;c.state='moving';c.elapsed=c.plan.durations[seg]*.3;c.last_time=1.
+        c.nominal=m.table_pose(c.plan.tables[seg],.3);c.commanded=c.nominal.copy()
+        c.phase_geometry=PhaseGeometry(c.plan.tables[seg][0],c.plan.tables[seg][0],'l')
+        reference=tilt(reference_rotation(c.nominal))
+        previous=m.table_pose(c.plan.tables[seg],(c.elapsed-.02)/c.plan.durations[seg])
+        c.planned_rate=(reference-tilt(reference_rotation(previous)))/.02
+        feed(c,1.02,angles=reference+[np.deg2rad(1.10),0.],gyro=(*c.planned_rate,0.))
+        # With this actual cached transfer rate, the old prediction exceeds
+        # 1.25 degrees despite a steady 1.10 degree error and zero rate error.
+        self.assertGreater(np.deg2rad(1.10)+c.s.transfer_lookahead*c.planned_rate[0],c.s.transfer_error)
+        c.tick(1.02)
+        self.assertEqual(c.state,'moving',c.status(1.02))
+        self.assertEqual(c.backoffs,0)
+        self.assertFalse(c.fault,c.fault)
+
+    def test_uncommanded_rotation_still_triggers_transfer_backoff(self):
+        c=controller();seg=('place_right','lean_right')
+        c.segment=seg;c.state='moving';c.elapsed=c.plan.durations[seg]*.3;c.last_time=1.
+        c.nominal=m.table_pose(c.plan.tables[seg],.3);c.commanded=c.nominal.copy()
+        c.phase_geometry=PhaseGeometry(c.plan.tables[seg][0],c.plan.tables[seg][0],'l')
+        c.planned_rate=np.array([.02,0.])
+        feed(c,1.02,angles=tilt(reference_rotation(c.nominal)),gyro=(.14,0.,0.))
+        c.tick(1.02)
+        self.assertEqual(c.state,'recovering')
+        np.testing.assert_allclose(c.interruption_snapshot['error_rate_rad_s'],[.12,0.])
+
+    def test_reference_rate_uses_the_real_control_interval(self):
+        c=controller();seg=('place_right','lean_right')
+        c.segment=seg;c.state='moving';c.elapsed=c.plan.durations[seg]*.3;c.last_time=1.
+        c.nominal=m.table_pose(c.plan.tables[seg],.3);c.commanded=c.nominal.copy()
+        c.phase_geometry=PhaseGeometry(c.plan.tables[seg][0],c.plan.tables[seg][0],'l')
+        before=tilt(reference_rotation(c.nominal))
+        feed(c,1.08,angles=before)
+        c.tick(1.08)
+        after=tilt(reference_rotation(c.nominal))
+        np.testing.assert_allclose(c.planned_rate,(after-before)/.08,atol=1e-9)
+
     def test_placement_interruption_relaxes_swing_and_keeps_posture_feedback(self):
         c=controller();q=self.row('swing_right');c.nominal=q.copy();c.commanded=q.copy()
         c.state='moving';c.segment=('swing_right','place_right');c.last_time=1.

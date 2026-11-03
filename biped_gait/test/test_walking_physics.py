@@ -15,18 +15,23 @@ class WalkingPhysicsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import xacro
+        import yaml
+        from biped_mujoco.sim_core import DEFAULTS
         cls.package = ROOT/'robotv2_description'
+        parameters=yaml.safe_load((ROOT/'biped_mujoco/config/mujoco.yaml').read_text())['mujoco_biped']['ros__parameters']
+        cls.launch_parameters={k:parameters[k] for k in DEFAULTS if k in parameters}
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)/'robot.xacro'
             p.write_text((cls.package/'urdf/robot.urdf.xacro').read_text().replace('$(find robotv2_description)', str(cls.package)))
             cls.urdf = xacro.process_file(str(p), mappings={'use_sim': 'false'}).toxml()
 
-    def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False):
+    def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False,
+                 parameters=None, landings_required=3):
         import mujoco
         from test_feedback import controller
         from biped_gait.feedback_walk import NAMES
         from biped_mujoco.sim_core import BipedSim
-        sim = BipedSim(self.urdf, self.package, {'kp':50., 'torque_fraction':.5})
+        sim = BipedSim(self.urdf, self.package, parameters or {'kp':50., 'torque_fraction':.5})
         self.addCleanup(sim._tmp.cleanup)
         if obstacle:
             # Introduce a 4 mm patch under the actual right toe just before
@@ -66,7 +71,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                     pushed = True
                 if transfer_push and c.backoffs and c.state == 'standing':
                     stopped = True
-                if not push and not obstacle and not transfer_push and c.landings>=3 and not stopped:
+                if not push and not obstacle and not transfer_push and c.landings>=landings_required and not stopped:
                     c.command('stop', now)
                     stopped = True
                 if obstacle and not patch_placed and c.segment == ('swing_right', 'place_right'):
@@ -128,7 +133,7 @@ class WalkingPhysicsTests(unittest.TestCase):
             self.assertEqual(c.landings,0)
             self.assertEqual(c.state,'standing')
         elif not push:
-            self.assertEqual(c.landings,3)
+            self.assertEqual(c.landings,landings_required)
             self.assertEqual(c.state,'standing')
             self.assertLess(peak, 6.5)
             sign = 1 if direction == 'forward' else -1
@@ -154,3 +159,9 @@ class WalkingPhysicsTests(unittest.TestCase):
 
     def test_lateral_disturbance_during_transfer_returns_to_standing(self):
         self.run_case(transfer_push=True)
+
+    def test_default_mujoco_motors_forward_six_landings(self):
+        self.run_case(parameters=self.launch_parameters,landings_required=6)
+
+    def test_default_mujoco_motors_backward_six_landings(self):
+        self.run_case('backward',parameters=self.launch_parameters,landings_required=6)

@@ -443,14 +443,27 @@ foot placement; the lifted foot does not define body attitude.
 During a double-support transfer, look a short time ahead:
 
 ```text
-predicted tilt error = current error + 0.25 seconds * gyro rate
+error rate = measured gyro rate - planned body rotation rate
+predicted tilt error = current error + 0.25 seconds * error rate
 ```
 
-If its magnitude exceeds 1.25° or horizontal gyro rate exceeds 0.10 rad/s, reverse
+If its magnitude exceeds 1.25° or the horizontal rate error exceeds 0.10 rad/s, reverse
 progress along that transfer's own path. Both feet remain planted and posture
 feedback continues. Return to the previous stance and wait for another explicit
 request, or remain in `transfer_hold` when that stance is not centred. This acts
 before the 8° hard limit; it is not a guarantee of catching an established fall.
+
+The planned rate comes from accepted body targets divided by the actual control
+time interval. Intended rotation during weight transfer is therefore not counted
+as disturbance growth. For example, a steady 1.10° tracking error while measured
+and commanded rotation rates are both 0.02 rad/s stays a 1.10° predicted error.
+The old raw-gyro prediction incorrectly increased it to 1.386°, triggering a
+false backoff. No error/rate limit is raised by this correction.
+
+Transfer backoffs now print roll/pitch error, planned rotation rate and rate
+error. Their first `interruption_snapshot` records those values and the measured
+and commanded joints before returning, so a later healthy pose does not hide
+the original event.
 
 The absolute 8° tilt limit, large tracking error, stale inputs and bridge health
 checks remain. A hard fault holds the last target, or suppresses output for
@@ -502,7 +515,7 @@ tracking joint, transfer-backoff count, interruption reason and placement data:
 measured body height, entry clearance, remaining downward budget and alignment
 error. `hardware_ready` describes current input health; it does not clear a
 latched interruption/fault. `contact_measured` always remains `false`.
-`interruption_snapshot` freezes the first placement interruption, including gyro
+`interruption_snapshot` freezes the first transfer or placement interruption, including gyro
 rates, measured and commanded joints, alignment/capture stage, clearance and
 IMU/joint-state source-time skew. Record it before restarting; current healthy
 readings do not explain a transient that has already passed.
@@ -521,9 +534,9 @@ to standing. Peak torso tilt is about 3.92° forward and 3.83° backward. A rais
 patch test interrupts placement and checks bounded relief with active feedback.
 These are simulation results, not identified hardware gains or torque ratings.
 
-All 48 gait tests pass. A 3 N sideways pulse for 0.1 seconds during double-support
+All 53 gait tests pass. A 3 N sideways pulse for 0.1 seconds during double-support
 transfer triggers an early return to standing with no foot lift; peak tilt in
-that test is about 2.57°. This checks one recoverable disturbance, not every fall.
+that test is about 2.32°. This checks one recoverable disturbance, not every fall.
 An actual ROS/MuJoCo launch also completes a step and centred stop, with no idle
 commands. Precomputed startup reaches ready input status in about 1.15 seconds
 on the development machine; the largest command gap in that run is about 28 ms.
@@ -532,6 +545,15 @@ step and centred stop also pass. A separate uneven-timing comparison reduces
 peak placement rotation from about 0.088 to 0.031 rad/s with the new transitions;
 the landing rotation limit remains 0.12 rad/s. These checks do not establish
 the cause of every real-time or graphical-simulation interruption.
+
+Continuous-walking regressions also read the actual MuJoCo launch parameter
+YAML, including its 100 N·m/rad motor stiffness and full configured torque limit,
+and require six landings in each direction before stopping. This covers the
+post-landing transfer that a single-step-and-centre ROS test does not exercise.
+A continuous ROS/MuJoCo run using `start` completes six landings and a requested
+stop, with peak torso tilt about 3.75° and a largest command gap about 28 ms on
+the development machine. This is a headless simulation result; it does not
+establish the cause of a different graphical/hardware run without its error data.
 
 The source description still notes that its mass/mesh articulated alignment has
 not been physically validated. The walker cannot measure force, detect every
