@@ -70,6 +70,22 @@ class FeedbackTests(unittest.TestCase):
         np.testing.assert_allclose(self.c.requested, 0, atol=1e-9)
         self.assertAlmostEqual(self.c.imu.angles[0], -self.c.s.body_roll, places=6)
 
+    def test_damping_filters_gyro_once_per_source_sample(self):
+        self.pose()
+        self.c.imu.sample_time=self.now
+        self.c.tick(self.now)
+        self.now+=.02
+        feed(self.c,self.now,gyro=(.10,0.,0.))
+        self.c.imu.sample_time=self.now
+        self.c.tick(self.now)
+        expected=.10*(1-math.exp(-.02/self.c.s.gyro_filter_time))
+        self.assertAlmostEqual(self.c.balance_rate[0],expected)
+        self.assertAlmostEqual(self.c.requested[0],-self.c.s.kd*expected)
+        self.now+=.02
+        feed(self.c,self.now,gyro=(.10,0.,0.))
+        self.c.tick(self.now)
+        self.assertAlmostEqual(self.c.balance_rate[0],expected)
+
     def test_lifted_left_foot_does_not_define_body_attitude(self):
         self.pose('swing_left')
         self.c.support='r'
@@ -141,6 +157,16 @@ class FeedbackTests(unittest.TestCase):
         np.testing.assert_array_equal(self.c.tick(self.now), held)
         self.assertLess(self.c.clearance, -.001)
         self.assertIn('contact NOT confirmed', self.c.interruption)
+
+    def test_filtered_damping_does_not_hide_a_raw_landing_rate_warning(self):
+        self.landing()
+        self.c.tick(self.now)
+        self.now+=.02
+        feed(self.c,self.now,gyro=(.13,0.,0.))
+        self.c.tick(self.now)
+        self.assertLess(self.c.balance_rate[0],self.c.s.landing_rotation_rate)
+        self.assertEqual(self.c.state,'placement_hold')
+        self.assertIn('rotation_rate_rad_s',self.c.interruption)
 
     def test_nominal_landing_has_no_overtravel_and_bounded_descent(self):
         for p in plans().cache.values():

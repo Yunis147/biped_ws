@@ -26,7 +26,7 @@ class WalkingPhysicsTests(unittest.TestCase):
             cls.urdf = xacro.process_file(str(p), mappings={'use_sim': 'false'}).toxml()
 
     def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False,
-                 parameters=None, landings_required=3):
+                 parameters=None, landings_required=3, rate_spike=False, control_steps=(10,), sensor_delay=0.):
         import mujoco
         from test_feedback import controller
         from biped_gait.feedback_walk import NAMES
@@ -57,12 +57,30 @@ class WalkingPhysicsTests(unittest.TestCase):
         peak = integral = 0.
         start_x = float(sim.base_pose()[0][0])
         lift_heights = {'r':0.,'l':0.}
+        history=[];sensor_index=0;control_due=control_index=0
+        spike_left=rate_pauses=0;spike_started=False
         for i in range(int(260/.002)):
-            if i%10 == 0:
+            if sensor_delay and i%5 == 0:
+                quat,gyro,accel=sim.imu()
+                history.append((sim.time,sim.joint_positions().copy(),sim.joint_velocities().copy(),quat,gyro.copy(),accel.copy()))
+            if i == control_due:
+                control_due+=control_steps[control_index%len(control_steps)];control_index+=1
                 now = sim.time
-                quat, gyro, accel = sim.imu()
-                c.imu.update(gyro, accel, quat, now)
-                c.feedback.joints(NAMES, sim.joint_positions(), sim.joint_velocities(), now)
+                if sensor_delay:
+                    while sensor_index<len(history) and history[sensor_index][0]<=now-sensor_delay+1e-9:
+                        stamp,q,v,quat,gyro,accel=history[sensor_index]
+                        c.imu.update(gyro,accel,quat,now,sample_time=stamp)
+                        c.feedback.joints(NAMES,q,v,now,now-stamp)
+                        sensor_index+=1
+                else:
+                    quat, gyro, accel = sim.imu()
+                    if rate_spike and not spike_started and c.segment == ('place_right','lean_right') and c.elapsed>c.plan.durations[c.segment]*.5:
+                        spike_started=True;spike_left=2
+                    if spike_left:
+                        gyro=gyro.copy();gyro[:2]=c.planned_rate+[-.0728,-.0700]
+                        spike_left-=1
+                    c.imu.update(gyro, accel, quat, now)
+                    c.feedback.joints(NAMES, sim.joint_positions(), sim.joint_velocities(), now)
                 if now>=2 and not started:
                     c.command('stand' if push else direction, now)
                     started = True
@@ -84,6 +102,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                     mujoco.mj_forward(sim.model, sim.data)
                     patch_placed = True
                 target = c.tick(now)
+                rate_pauses+=int(getattr(c,'transfer_paused',False))
                 if c.segment and c.segment[1] in ('swing_right','swing_left'):
                     from biped_gait.placement import ground_estimate
                     stance = 'l' if c.segment[1] == 'swing_right' else 'r'
@@ -139,6 +158,10 @@ class WalkingPhysicsTests(unittest.TestCase):
             sign = 1 if direction == 'forward' else -1
             self.assertGreater(sign*(float(sim.base_pose()[0][0])-start_x),.015)
             self.assertGreater(min(lift_heights.values()),.001)
+            self.assertEqual(c.backoffs,0)
+        if rate_spike:
+            self.assertTrue(spike_started)
+            self.assertGreater(rate_pauses,0)
         print('PHYSICS',direction,'push',push,'feedback',gain,'peak',peak,'integral',integral,'landings',c.landings,flush=True)
         return dict(peak=peak, integral=integral)
 
@@ -165,3 +188,10 @@ class WalkingPhysicsTests(unittest.TestCase):
 
     def test_default_mujoco_motors_backward_six_landings(self):
         self.run_case('backward',parameters=self.launch_parameters,landings_required=6)
+
+    def test_rate_only_burst_after_landing_resumes_and_completes_six_landings(self):
+        self.run_case(parameters=self.launch_parameters,landings_required=6,rate_spike=True)
+
+    def test_delayed_sensors_and_uneven_control_complete_six_landings(self):
+        self.run_case(parameters=self.launch_parameters,landings_required=6,
+                      control_steps=(10,10,20,10),sensor_delay=.02)

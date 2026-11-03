@@ -49,6 +49,7 @@ class QuasiStaticWalker(Node):
         self.last_warning = ''
         self.last_state = None
         self.get_logger().info(f'Ready: IMU feedback required, planned lean {math.degrees(settings.body_roll):.2f} deg, correction limited to {math.degrees(settings.max_correction):.2f} deg. '
+                               f'Rate-only backoff confirmation {settings.transfer_rate_duration:.2f} s; gyro damping filter {settings.gyro_filter_time:.2f} s. '
                                'No joint commands until stand/start/step; quiet gyro calibration is automatic.')
 
     def now(self):

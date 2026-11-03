@@ -10,6 +10,7 @@ quasi_static_walker:
     lift_clearance: 0.004
     kp: 0.3
     kd: 0.04
+    gyro_filter_time: 0.04
     max_correction: 0.026179938779914945
     correction_rate: 0.05
     max_joint_speed: 0.25
@@ -28,6 +29,7 @@ quasi_static_walker:
     placement_capture_acceleration: 0.3
     transfer_error: 0.02181661564992912
     transfer_rate: 0.1
+    transfer_rate_duration: 0.1
     transfer_lookahead: 0.25
     penetration_tolerance: 0.001
     fault_tilt: 0.13962634015954636

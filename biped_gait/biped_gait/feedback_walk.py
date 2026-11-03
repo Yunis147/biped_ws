@@ -25,6 +25,7 @@ class Settings:
     lift_clearance: float = .004
     kp: float = .30
     kd: float = .04
+    gyro_filter_time: float = .04
     max_correction: float = math.radians(1.5)
     correction_rate: float = .05
     max_joint_speed: float = .25
@@ -43,6 +44,7 @@ class Settings:
     placement_capture_acceleration: float = .30
     transfer_error: float = math.radians(1.25)
     transfer_rate: float = .10
+    transfer_rate_duration: float = .10
     transfer_lookahead: float = .25
     penetration_tolerance: float = .001
     fault_tilt: float = math.radians(8)
@@ -167,6 +169,10 @@ class WalkingController:
         self.correction = np.zeros(2)
         self.requested = np.zeros(2)
         self.planned_rate = np.zeros(2)
+        self.balance_rate = np.zeros(2)
+        self.balance_rate_time = None
+        self.transfer_paused = False
+        self.transfer_rate_since = None
         self.segment = None
         self.elapsed = self.waited = self.settled = 0.
         self.last_time = None
@@ -277,6 +283,8 @@ class WalkingController:
         self.clearance, self.landing_cues = None, {}
         self.elapsed = self.waited = self.settled = 0.
         self.planned_rate[:] = 0.
+        self.transfer_paused = False
+        self.transfer_rate_since = None
         new_support = m.STANCE.get(b, self.support)
         self.support = new_support
         try:
@@ -314,7 +322,7 @@ class WalkingController:
         self.reason = 'placing from measured bent-leg geometry'
         bend = min(-self.nominal[NAMES.index(side+'_knee_joint')] for side in 'rl')
         authority = float(np.clip((bend-.20)/.30,0.,1.))
-        requested = np.clip(-self.s.kp*error-self.s.kd*self.imu.gyro[:2],
+        requested = np.clip(-self.s.kp*error-self.s.kd*self.balance_rate,
                             -self.s.max_correction, self.s.max_correction)*authority*.5
         for scale in (1., .5, .25, .125):
             correction = self.correction+np.clip(requested-self.correction,
@@ -429,6 +437,15 @@ class WalkingController:
             self.fail('large servo tracking error; last target held', now)
         if self.fault:
             return self.commanded.copy()
+        # Smooth the rate used for damping, using sensor time rather than timer
+        # callback count. Raw gyro and tilt still drive all interruption checks.
+        sample_time = self.imu.sample_time if self.imu.sample_time is not None else self.imu.time
+        if self.balance_rate_time is None:
+            self.balance_rate = self.imu.gyro[:2].copy()
+        elif sample_time > self.balance_rate_time:
+            gain = -math.expm1(-(sample_time-self.balance_rate_time)/self.s.gyro_filter_time)
+            self.balance_rate += gain*(self.imu.gyro[:2]-self.balance_rate)
+        self.balance_rate_time = sample_time
         rate_dt = dt
         dt = min(max(dt, 0.), .04)
         if self.state in ('approach', 'approach_settle'):
@@ -451,12 +468,27 @@ class WalkingController:
         target_angles = tilt(reference_rotation(self.nominal,self.support))
         error = self.imu.angles-target_angles
         transfer = self.segment is not None and self.segment[1] in ('ready', 'lean_left', 'lean_right', 'lean_left_cycle')
+        self.transfer_paused = False
         if self.state == 'moving' and transfer:
             # Predict ERROR growth. The commanded body rotation is intentional,
             # so its rate must be removed from the measured gyro rate.
             error_rate = self.imu.gyro[:2]-self.planned_rate
             predicted = error+self.s.transfer_lookahead*error_rate
-            if np.max(np.abs(predicted)) > self.s.transfer_error or np.linalg.norm(error_rate) > self.s.transfer_rate:
+            rate_error = float(np.linalg.norm(error_rate))
+            # A single rate spike must not reverse the entire transfer. Pause
+            # its nominal progress, retain posture feedback, and require 100 ms
+            # of sensor time before backing off on rate alone. Hysteresis keeps
+            # a value near the threshold from repeatedly pausing and resuming.
+            sample_time = self.imu.sample_time if self.imu.sample_time is not None else self.imu.time
+            if rate_error > self.s.transfer_rate and self.transfer_rate_since is None:
+                self.transfer_rate_since = sample_time
+            if rate_error < .8*self.s.transfer_rate:
+                self.transfer_rate_since = None
+            rate_duration = 0. if self.transfer_rate_since is None else max(0.,sample_time-self.transfer_rate_since)
+            self.transfer_paused = self.transfer_rate_since is not None
+            tilt_unsafe = np.max(np.abs(error)) > self.s.transfer_error or np.max(np.abs(predicted)) > self.s.transfer_error
+            rate_unsafe = self.transfer_paused and rate_duration+1e-9 >= self.s.transfer_rate_duration
+            if tilt_unsafe or rate_unsafe:
                 if self.interruption_snapshot is None:
                     self.interruption_snapshot = dict(kind='weight_transfer',time=now,segment=self.segment,
                         measured_tilt_deg=np.degrees(self.imu.angles).tolist(),
@@ -467,16 +499,20 @@ class WalkingController:
                         error_rate_rad_s=error_rate.tolist(), elapsed_s=self.elapsed,
                         predicted_error_limit_deg=math.degrees(self.s.transfer_error),
                         rate_error_limit_rad_s=self.s.transfer_rate,
+                        trigger='tilt prediction' if tilt_unsafe else 'persistent rotation rate',
+                        rate_duration_s=rate_duration,
                         imu_source_time=self.imu.sample_time,joint_source_time=self.joint_source_time,
                         target=self.commanded.tolist(),measured=self.feedback.q.tolist())
                 self.state = 'recovering'
+                self.transfer_paused = False
                 self.stop_requested = True
                 self.backoffs += 1
                 self.interruption = ('weight transfer backed off before foot lift; '
                     f'predicted error={float(np.degrees(np.max(np.abs(predicted)))):.2f} deg (limit {math.degrees(self.s.transfer_error):.2f}), '
                     f'roll/pitch error={np.degrees(error).round(2).tolist()} deg, '
                     f'planned rate={self.planned_rate.round(4).tolist()} rad/s, '
-                    f'error rate={float(np.linalg.norm(error_rate)):.3f} rad/s (limit {self.s.transfer_rate:.3f}); posture feedback remains active')
+                    f'error rate={rate_error:.3f} rad/s (entry {self.s.transfer_rate:.3f}, release {.8*self.s.transfer_rate:.3f}, duration {rate_duration:.3f} s); '
+                    f'trigger={"tilt prediction" if tilt_unsafe else "persistent rotation rate"}; posture feedback remains active')
         landing = self.segment is not None and self.segment[1].startswith('place_')
         if landing and self.state != 'placement_hold':
             stance = m.STANCE[self.segment[1]]
@@ -522,7 +558,7 @@ class WalkingController:
         # Backtrack the complete nominal progress AND attitude correction, never
         # clip separate joint angles. Hold if no synchronized candidate is feasible.
         for scale in (1., .5, .25, .125, 0.):
-            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' else 0.
+            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' and not self.transfer_paused else 0.
             next_elapsed = max(0., self.elapsed+progress*dt*scale)
             nominal = self.nominal.copy()
             if self.state in ('moving', 'recovering'):
@@ -539,7 +575,7 @@ class WalkingController:
                 nominal += delta*min(1., .1*dt*scale/max(float(np.max(np.abs(delta))), 1e-9))
             reference = tilt(reference_rotation(nominal,self.support))
             rate = (reference-target_angles)/max(rate_dt, 1e-6)
-            requested = -self.s.kp*(self.imu.angles-reference)-self.s.kd*(self.imu.gyro[:2]-rate)
+            requested = -self.s.kp*(self.imu.angles-reference)-self.s.kd*(self.balance_rate-rate)
             bend = min(-nominal[NAMES.index(side+'_knee_joint')] for side in 'rl')
             authority = float(np.clip((bend-.20)/.30, 0., 1.))
             requested = np.clip(requested, -self.s.max_correction, self.s.max_correction)*authority*(.5 if landing else 1.)
@@ -575,7 +611,8 @@ class WalkingController:
             self.pause_since = now if self.pause_since is None else self.pause_since
             if now-self.pause_since > 1.:
                 self.fail('no feasible bounded feedback target', now)
-        self.reason = self.fault or (self.interruption if self.interruption and self.state in ('recovering', 'placement_hold', 'transfer_hold', 'standing') else self.state)
+        self.reason = self.fault or (self.interruption if self.interruption and self.state in ('recovering', 'placement_hold', 'transfer_hold', 'standing') else
+            'weight transfer paused for rotation to settle; posture feedback remains active' if self.transfer_paused else self.state)
         return self.commanded.copy()
 
     def _lag(self, now):
@@ -597,6 +634,8 @@ class WalkingController:
             calibrated=self.imu.calibrated, roll_pitch_deg=None if self.imu.angles is None else np.degrees(self.imu.angles).tolist(),
             planned_roll_pitch_deg=np.degrees(tilt(reference_rotation(self.nominal,self.support))).tolist(),
             planned_rate_rad_s=self.planned_rate.tolist(),
+            balance_rate_rad_s=self.balance_rate.tolist(),
+            transfer_rate_paused=self.transfer_paused,
             correction_deg=np.degrees(self.correction).tolist(), maximum_lean_deg=math.degrees(self.s.body_roll),
             tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
             predicted_swing_clearance_m=self.clearance, landings=self.landings,

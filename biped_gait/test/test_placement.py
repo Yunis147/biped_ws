@@ -175,6 +175,74 @@ class PlacementTests(unittest.TestCase):
         after=tilt(reference_rotation(c.nominal))
         np.testing.assert_allclose(c.planned_rate,(after-before)/.08,atol=1e-9)
 
+    def rate_warning(self):
+        c=controller();seg=('place_right','lean_right')
+        c.segment=seg;c.state='moving';c.elapsed=c.plan.durations[seg]*.3;c.last_time=1.
+        c.nominal=m.table_pose(c.plan.tables[seg],.3);c.commanded=c.nominal.copy()
+        c.phase_geometry=PhaseGeometry(c.plan.tables[seg][0],c.plan.tables[seg][0],'l')
+        c.planned_rate=np.array([.0145,-.0001])
+        reference=tilt(reference_rotation(c.nominal))
+        rate_error=np.array([-.0728,-.0700])
+        feed(c,1.02,angles=reference+np.radians([.11,.04]),gyro=(*c.planned_rate+rate_error,0.))
+        c.imu.sample_time=1.02
+        return c,reference,rate_error
+
+    def test_rate_only_spike_pauses_then_resumes_without_reversing(self):
+        c,reference,_=self.rate_warning();before=c.elapsed
+        c.tick(1.02)
+        self.assertEqual(c.state,'moving')
+        self.assertTrue(c.transfer_paused)
+        self.assertEqual(c.elapsed,before)
+        self.assertEqual(c.backoffs,0)
+        self.assertLess(np.max(np.abs(c.commanded-c.nominal)),.005)
+        feed(c,1.04,angles=reference);c.imu.sample_time=1.04
+        c.tick(1.04)
+        self.assertFalse(c.transfer_paused)
+        self.assertGreater(c.elapsed,before)
+        self.assertEqual(c.backoffs,0)
+
+    def test_rate_warning_has_hysteresis(self):
+        c,reference,rate_error=self.rate_warning();before=c.elapsed
+        c.tick(1.02)
+        feed(c,1.04,angles=reference,gyro=(*(.09*rate_error/np.linalg.norm(rate_error)),0.))
+        c.imu.sample_time=1.04;c.tick(1.04)
+        self.assertTrue(c.transfer_paused)
+        self.assertEqual(c.elapsed,before)
+        feed(c,1.06,angles=reference,gyro=(.079,0.,0.))
+        c.imu.sample_time=1.06;c.tick(1.06)
+        self.assertFalse(c.transfer_paused)
+        self.assertGreater(c.elapsed,before)
+
+    def test_persistent_rate_uses_new_sensor_time_before_recovery(self):
+        c,reference,rate_error=self.rate_warning()
+        c.tick(1.02)
+        for now in (1.04,1.06,1.08,1.10,1.12):
+            feed(c,now,angles=reference,gyro=(*rate_error,0.))
+            c.imu.sample_time=1.02
+            c.tick(now)
+            self.assertEqual(c.state,'moving')
+            self.assertEqual(c.backoffs,0)
+        feed(c,1.14,angles=reference,gyro=(*rate_error,0.))
+        c.imu.sample_time=1.14;c.tick(1.14)
+        self.assertEqual(c.state,'recovering')
+        self.assertEqual(c.backoffs,1)
+        self.assertEqual(c.interruption_snapshot['trigger'],'persistent rotation rate')
+        self.assertAlmostEqual(c.interruption_snapshot['rate_duration_s'],.12)
+
+    def test_unsafe_predicted_tilt_recovers_without_rate_delay(self):
+        c,reference,_=self.rate_warning()
+        feed(c,1.02,angles=reference,gyro=(.25,0.,0.))
+        c.tick(1.02)
+        self.assertEqual(c.state,'recovering')
+        self.assertEqual(c.interruption_snapshot['trigger'],'tilt prediction')
+
+    def test_unsafe_measured_tilt_cannot_be_hidden_by_opposite_rate(self):
+        c,reference,_=self.rate_warning()
+        feed(c,1.02,angles=reference+np.radians([1.4,0.]),gyro=(-.06,0.,0.))
+        c.tick(1.02)
+        self.assertEqual(c.state,'recovering')
+        self.assertEqual(c.interruption_snapshot['trigger'],'tilt prediction')
+
     def test_placement_interruption_relaxes_swing_and_keeps_posture_feedback(self):
         c=controller();q=self.row('swing_right');c.nominal=q.copy();c.commanded=q.copy()
         c.state='moving';c.segment=('swing_right','place_right');c.last_time=1.

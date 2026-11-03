@@ -3,7 +3,8 @@
 The current node adds three changes for the reported physical failures:
 
 - **Weight transfer:** a smaller 3.44° planned torso angle, posture feedback, and
-  early reversal of a double-support transfer when tilt error/rate grows.
+  a brief pause for a rotation-rate spike, with early reversal if it persists
+  or the measured/predicted tilt error is too large.
 - **Placement:** supporting-leg encoders and IMU tilt determine the estimated
   floor relative to the bent body. The swing foot stops at that estimate instead
   of finishing a fixed extension. Its landing position is relative to the
@@ -430,7 +431,7 @@ For roll and pitch, the requested small body correction is:
 
 ```text
 error = measured tilt - planned tilt
-correction = -0.30 * error - 0.04 * (gyro rate - planned rotation rate)
+correction = -0.30 * error - 0.04 * (filtered gyro rate - planned rotation rate)
 ```
 
 Gyro units are radians/second. The correction is limited to ±1.5°, rate-limited
@@ -440,6 +441,21 @@ limited to 0.25 rad/s; individual joints are not clipped independently.
 The planned attitude is taken from the supporting leg, including during left
 foot placement; the lifted foot does not define body attitude.
 
+The gyro rate used for damping is smoothed over 0.04 seconds. This reduces
+quickly changing corrections when sensor messages arrive late or a rate reading
+jumps. For a new sensor sample:
+
+```text
+a = 1 - exp(-time since previous sample / 0.04 seconds)
+filtered rate = previous filtered rate + a * (new rate - previous filtered rate)
+```
+
+Here `exp(x)` means the exponential function. At a 0.02-second interval,
+`a` is about 0.393: use about 39% of the new reading and 61% of the previous
+filtered value. Reading the same sensor timestamp twice does not advance this
+filter. The interruption checks below still use the original gyro reading;
+smoothing the damping command does not hide a dangerous rate or tilt.
+
 During a double-support transfer, look a short time ahead:
 
 ```text
@@ -447,9 +463,22 @@ error rate = measured gyro rate - planned body rotation rate
 predicted tilt error = current error + 0.25 seconds * error rate
 ```
 
-If its magnitude exceeds 1.25° or the horizontal rate error exceeds 0.10 rad/s, reverse
-progress along that transfer's own path. Both feet remain planted and posture
-feedback continues. Return to the previous stance and wait for another explicit
+If the measured or predicted error exceeds 1.25°, reverse progress immediately
+along that transfer's own path. A rate-only warning works differently:
+
+1. When the horizontal rate error exceeds 0.10 rad/s, pause the transfer's
+   progress. Keep both feet planted and keep posture correction active.
+2. Resume once the rate error drops below 0.08 rad/s. The lower release value
+   prevents repeated stop/start decisions around 0.10 rad/s.
+3. If it does not settle within 0.10 seconds of new IMU samples, reverse the
+   transfer. Repeated control callbacks using one old IMU sample cannot confirm
+   this duration. Tilt checks remain immediate during the pause.
+
+The 0.10-second confirmation affects only a rate-only warning. For example,
+one reading of 0.101 rad/s with a predicted error of 0.99° pauses rather than
+reversing the entire transfer. A continuing problem still causes recovery.
+
+During reversal, posture feedback continues. Return to the previous stance and wait for another explicit
 request, or remain in `transfer_hold` when that stance is not centred. This acts
 before the 8° hard limit; it is not a guarantee of catching an established fall.
 
@@ -460,8 +489,8 @@ and commanded rotation rates are both 0.02 rad/s stays a 1.10° predicted error.
 The old raw-gyro prediction incorrectly increased it to 1.386°, triggering a
 false backoff. No error/rate limit is raised by this correction.
 
-Transfer backoffs now print roll/pitch error, planned rotation rate and rate
-error. Their first `interruption_snapshot` records those values and the measured
+Transfer backoffs print roll/pitch error, planned rotation rate, rate error,
+its duration and the triggering check. Their first `interruption_snapshot` records those values and the measured
 and commanded joints before returning, so a later healthy pose does not hide
 the original event.
 
@@ -527,33 +556,61 @@ python3 -B biped_gait/biped_gait/quasi_static_walk.py --check
 python3 -B -m unittest discover -s biped_gait/test -v
 ```
 
+For an actual ROS/MuJoCo launch, source the built workspace and run these
+commands from the workspace directory, one at a time:
+
+```bash
+python3 -B src/biped_gait/test/run_mujoco_walk.py --landings 12
+python3 -B src/biped_gait/test/run_mujoco_walk.py --landings 6 --stress --domain 210
+```
+
+They start their own headless simulation in a private ROS domain restricted to
+localhost, request continuous walking, then request a centred stop. They fail on
+a fault, transfer reversal, tilt over 6°, no forward movement or insufficient
+landings. Launch logs and a JSON result are saved in the directory printed by
+the script. No joint commands are sent to the normal robot domain.
+
+The stress run adds 20 ms of sensor delivery delay and a 40 ms gyro-only burst
+in the transfer after the first landing. It checks that the controller pauses,
+resumes and completes the following steps. This is a deliberately constructed
+test, not a recording of the physical robot's IMU.
+
 Physics tests require MuJoCo and xacro. They use simulated IMU/encoders, the
 current URDF, 50 Hz control, assumed stiffness 50 N·m/rad and 50% of assumed stall
 torque. The controller completes three landings in each direction and returns
-to standing. Peak torso tilt is about 3.92° forward and 3.83° backward. A raised
+to standing. Peak torso tilt is about 3.92° forward and 3.82° backward. A raised
 patch test interrupts placement and checks bounded relief with active feedback.
 These are simulation results, not identified hardware gains or torque ratings.
 
-All 53 gait tests pass. A 3 N sideways pulse for 0.1 seconds during double-support
+All 62 gait tests pass. They include a brief rate-only burst after landing,
+six landings with 20 ms sensor delay and uneven control intervals, repeated
+sensor timestamps, and sustained-rate/immediate-tilt recovery checks.
+A 3 N sideways pulse for 0.1 seconds during double-support
 transfer triggers an early return to standing with no foot lift; peak tilt in
-that test is about 2.32°. This checks one recoverable disturbance, not every fall.
-An actual ROS/MuJoCo launch also completes a step and centred stop, with no idle
-commands. Precomputed startup reaches ready input status in about 1.15 seconds
-on the development machine; the largest command gap in that run is about 28 ms.
-With a deliberately added 25 ms processing delay during placement, a ROS/MuJoCo
-step and centred stop also pass. A separate uneven-timing comparison reduces
-peak placement rotation from about 0.088 to 0.031 rad/s with the new transitions;
-the landing rotation limit remains 0.12 rad/s. These checks do not establish
-the cause of every real-time or graphical-simulation interruption.
-
+that test is about 2.60°. This checks one recoverable disturbance, not every fall.
 Continuous-walking regressions also read the actual MuJoCo launch parameter
 YAML, including its 100 N·m/rad motor stiffness and full configured torque limit,
 and require six landings in each direction before stopping. This covers the
 post-landing transfer that a single-step-and-centre ROS test does not exercise.
-A continuous ROS/MuJoCo run using `start` completes six landings and a requested
-stop, with peak torso tilt about 3.75° and a largest command gap about 28 ms on
-the development machine. This is a headless simulation result; it does not
-establish the cause of a different graphical/hardware run without its error data.
+
+The rate-only physics test reproduces the earlier controller's reversal after
+the first landing: rate error 0.101 rad/s, predicted tilt error about 1.01°.
+The updated controller completes six landings with the same constructed burst.
+The real-time ROS stress check also completes six landings and a centred stop,
+including one 40 ms transfer pause followed by resumed walking. With 20 ms
+added sensor delivery delay, its peak torso tilt is about 3.75°, forward travel
+about 117 mm, and largest command gap about 32 ms on the development machine.
+The earlier version failed to settle in this delayed ROS test; smoothing the
+damping rate removes that failure in the tested run. This is a headless
+simulation result and a constructed sensor burst, not a recording of the user's
+graphical run or proof of physical walking.
+
+The default real-time ROS/MuJoCo launch also completes twelve landings followed
+by a centred stop: peak torso tilt about 3.76°, forward travel about 236 mm,
+and no transfer pause or reversal. The test observer's largest wall-time gap
+between received commands in that run is 334 ms, compared with 32 ms in the
+delayed-sensor run. These are receipt-time measurements; they do not establish
+publisher timing or hardware command deadlines.
 
 The source description still notes that its mass/mesh articulated alignment has
 not been physically validated. The walker cannot measure force, detect every
