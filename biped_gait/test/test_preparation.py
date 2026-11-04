@@ -33,12 +33,12 @@ class PreparationTests(unittest.TestCase):
         self.assertLess(max(-output[NAMES.index(s+'_knee_joint')] for s in 'rl'),.2)
         np.testing.assert_allclose(c.imu.angles,np.radians([.77,-.88]))
 
-    def test_crouch_pauses_on_excessive_measured_tilt_and_resumes(self):
+    def test_soft_tilt_limit_does_not_freeze_initial_straight_knees(self):
         c=self.preparing();before=c.elapsed;previous=c.commanded.copy()
         feed(c,1.02,angles=np.radians([1.6,0.]))
         output=c.tick(1.02)
-        self.assertTrue(c.preparation_paused)
-        self.assertEqual(c.elapsed,before)
+        self.assertFalse(c.preparation_paused)
+        self.assertGreater(c.elapsed,before)
         self.assertEqual(c.backoffs,0)
         self.assertLessEqual(np.max(np.abs(output-previous)),c.s.max_joint_speed*.02+1e-7)
         feed(c,1.04,angles=np.radians([.77,-.88]))
@@ -46,34 +46,41 @@ class PreparationTests(unittest.TestCase):
         self.assertFalse(c.preparation_paused)
         self.assertGreater(c.elapsed,before)
 
-    def test_crouch_pauses_on_large_raw_rotation(self):
+    def test_rate_reading_does_not_latch_the_old_preparation_timeout(self):
         c=self.preparing();before=c.elapsed
         feed(c,1.02,gyro=(.11,0.,0.))
         c.tick(1.02)
-        self.assertTrue(c.preparation_paused)
-        self.assertEqual(c.elapsed,before)
+        self.assertFalse(c.preparation_paused)
+        self.assertGreater(c.elapsed,before)
         self.assertFalse(c.fault)
         self.assertEqual(c.backoffs,0)
 
     def test_preparation_status_is_json_serializable_while_moving_or_paused(self):
         c=self.preparing()
-        for now,angle,paused in ((1.02,.01,False),(1.04,.03,True)):
+        for now,angle,paused in ((1.02,.01,False),(1.04,.03,False)):
             feed(c,now,angles=[angle,0.])
             c.tick(now)
             status=json.loads(json.dumps(c.status(now),allow_nan=False))
             self.assertIs(status['preparation_paused'],paused)
 
-    def test_crouch_pause_times_out_without_lifting_a_foot(self):
+    def test_unsettled_crouch_blocks_lift_after_bending_instead_of_freezing_startup(self):
         c=self.preparing();before=c.elapsed
-        for i in range(1,212):
+        for i in range(1,1300):
             now=1.+i*.02
             feed(c,now,angles=np.radians([1.6,0.]))
             c.tick(now)
             if c.fault:break
-        self.assertIn('initial crouch did not stabilize',c.fault)
-        self.assertEqual(c.elapsed,before)
+        self.assertIn('body/servos did not settle',c.fault)
+        self.assertNotIn('initial crouch did not stabilize',c.fault)
+        self.assertGreater(c.elapsed,before)
         self.assertEqual(c.landings,0)
         self.assertEqual(c.segment,('neutral','ready'))
+
+    def test_hard_tilt_fault_still_holds_during_initial_crouch(self):
+        c=self.preparing();before=c.commanded.copy()
+        feed(c,1.02,angles=np.radians([8.5,0.]))
+        np.testing.assert_array_equal(c.tick(1.02),before)
+        self.assertIn('measured torso tilt',c.fault)
 
     def test_sideways_transfer_still_checks_the_logged_tilt_prediction(self):
         c=self.preparing()

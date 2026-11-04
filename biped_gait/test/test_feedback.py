@@ -19,6 +19,8 @@ def plans():
 def controller(simulation=False, **kwargs):
     p = Plans.__new__(Plans)
     p.settings, p.cache = plans().settings, dict(plans().cache)
+    # These fixtures set tilt directly. Alignment tests supply real IMU history.
+    kwargs.setdefault('align_imu_at_startup',False)
     return WalkingController(p, simulation=simulation, **kwargs)
 
 

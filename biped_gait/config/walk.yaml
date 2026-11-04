@@ -39,7 +39,10 @@ quasi_static_walker:
     settle_error: 0.026179938779914945
     settle_timeout: 4.0
     settle_duration: 0.4
+    # auto uses the IMU's reported orientation when available.
     imu_source: auto
+    # align_imu_at_startup defaults true on hardware, false in simulation.
+    # Hardware startup must be upright at calibrated zero on a level floor.
     imu_frame: imu_link
     imu_mount_rpy:
     - 0.0

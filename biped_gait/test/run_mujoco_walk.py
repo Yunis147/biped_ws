@@ -23,12 +23,13 @@ def main():
     parser.add_argument('--landings',type=int,default=12)
     parser.add_argument('--stress',action='store_true')
     parser.add_argument('--prepare',action='store_true')
+    parser.add_argument('--hardware-imu',action='store_true',help='upright alignment with synthetic IMU offsets')
     parser.add_argument('--domain',type=int,default=209)
     parser.add_argument('--log-dir',type=Path)
     args=parser.parse_args()
     if args.landings<2 or not 1<=args.domain<=230:
         parser.error('use at least two landings and a private domain from 1 to 230')
-    if args.prepare and args.stress:
+    if (args.prepare or args.hardware_imu) and args.stress:
         parser.error('run preparation and walking stress checks separately')
     os.environ['ROS_DOMAIN_ID']=str(args.domain)
     os.environ['ROS_AUTOMATIC_DISCOVERY_RANGE']='LOCALHOST'
@@ -43,9 +44,10 @@ def main():
     logs=args.log_dir or Path(tempfile.mkdtemp(prefix='biped-mujoco-check-'))
     logs.mkdir(parents=True,exist_ok=True)
     launch_cmd=[shutil.which('ros2'),'launch','biped_mujoco','mujoco.launch.py','headless:=true','walk:=true']
-    if args.stress or args.prepare:
+    hardware_imu=args.prepare or args.hardware_imu
+    if args.stress or hardware_imu:
         launch_file=logs/'stress.launch.py'
-        launch_file.write_text('''from pathlib import Path
+        launch_text='''from pathlib import Path
 from ament_index_python.packages import get_package_share_directory as share
 from launch import LaunchDescription
 from launch.actions import IncludeLaunchDescription
@@ -55,19 +57,24 @@ def generate_launch_description():
     sim=IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(share('biped_mujoco'))/'launch/mujoco.launch.py')),launch_arguments={'headless':'true','walk':'false'}.items())
     walk=Node(package='biped_gait',executable='quasi_static_walk',output='screen',parameters=[str(Path(share('biped_gait'))/'config/walk.yaml'),{'use_sim_time':True}],remappings=[('/imu','/gait_test/imu'),('/joint_states','/gait_test/joint_states')])
     return LaunchDescription([sim,walk])
-''')
+'''
+        if hardware_imu:
+            launch_text=launch_text.replace("{'use_sim_time':True}",
+                "{'use_sim_time':True,'imu_source':'auto','align_imu_at_startup':True}")
+        launch_file.write_text(launch_text)
         launch_cmd=[shutil.which('ros2'),'launch',str(launch_file)]
 
     rclpy.init(domain_id=args.domain)
     node=rclpy.create_node('gait_mujoco_regression',parameter_overrides=[Parameter('use_sim_time',value=True)])
-    latest={};times=[];peak=0.;first_x=last_x=None
+    latest={};times=[];peak=peak_correction=0.;first_x=last_x=None
     transfer_start=None;burst_start=None;burst_samples=0
     preparation_start=None;measured_knees={}
     pending=deque()
     def now():return node.get_clock().now().nanoseconds*1e-9
     def status(message):
-        nonlocal transfer_start,preparation_start
+        nonlocal transfer_start,preparation_start,peak_correction
         latest.clear();latest.update(json.loads(message.data))
+        peak_correction=max(peak_correction,max(abs(v) for v in latest.get('correction_deg',[0.,0.])))
         if latest.get('segment')==['place_right','lean_right'] and transfer_start is None:
             transfer_start=now()
         if latest.get('segment')==['neutral','ready'] and preparation_start is None:
@@ -87,18 +94,18 @@ def generate_launch_description():
     node.create_subscription(Float64MultiArray,'/position_controller/commands',output,10)
     node.create_subscription(Odometry,'/mujoco/odom',odom,10)
     cmd=node.create_publisher(String,'/walk_cmd',10)
-    if args.stress or args.prepare:
-        if args.prepare:
+    if args.stress or hardware_imu:
+        if hardware_imu:
             import mujoco
             import numpy as np
             from biped_gait.imu import rpy_matrix,quaternion_matrix
-            offset=rpy_matrix(*np.radians([.77,-.88]))
+            offset=rpy_matrix(*np.radians([2.2,-1.9]))
         imu_pub=node.create_publisher(Imu,'/gait_test/imu',qos_profile_sensor_data)
         joint_pub=node.create_publisher(JointState,'/gait_test/joint_states',qos_profile_sensor_data)
         def enqueue(message,publisher):
             nonlocal burst_start,burst_samples
             stamp=message.header.stamp.sec+message.header.stamp.nanosec*1e-9
-            if args.prepare:
+            if hardware_imu:
                 if round(stamp*100)%2:return  # Replay at the hardware's 50 Hz.
                 if isinstance(message,Imu):
                     q=message.orientation;g=message.angular_velocity;a=message.linear_acceleration
@@ -106,6 +113,7 @@ def generate_launch_description():
                     mujoco.mju_mat2Quat(reported,(quaternion_matrix([q.x,q.y,q.z,q.w])@offset).ravel())
                     q.w,q.x,q.y,q.z=map(float,reported)
                     g.x,g.y,g.z=map(float,offset.T@np.array([g.x,g.y,g.z]))
+                    g.x+=.006;g.y-=.004;g.z+=.002
                     a.x,a.y,a.z=map(float,offset.T@np.array([a.x,a.y,a.z]))
                     if preparation_start is not None and .2<=now()-preparation_start<.3:
                         g.y-=math.radians(1.5);burst_samples+=1
@@ -120,7 +128,7 @@ def generate_launch_description():
                     message.angular_velocity.x=planned[0]-.0728
                     message.angular_velocity.y=planned[1]-.0700
                     burst_samples+=1
-            pending.append((stamp+(0. if args.prepare else .02),publisher,message))
+            pending.append((stamp+(0. if hardware_imu else .02),publisher,message))
         node.create_subscription(Imu,'/imu',lambda m:enqueue(m,imu_pub),qos_profile_sensor_data)
         node.create_subscription(JointState,'/joint_states',lambda m:enqueue(m,joint_pub),qos_profile_sensor_data)
         def deliver():
@@ -157,6 +165,10 @@ def generate_launch_description():
                 cmd.publish(String(data='stop'))
                 wait(lambda:latest.get('state')=='standing',70)
             assert latest.get('transfer_backoffs')==0,latest
+            if hardware_imu:
+                assert latest['imu_upright_alignment'] is not None,latest
+                assert latest['imu_source']=='quaternion',latest
+                if not args.prepare:assert peak_correction>.001,peak_correction
             if not args.prepare:assert last_x-first_x>.015,(first_x,last_x)
             launch_log.flush()
             pauses=(logs/'launch.log').read_text().count('weight transfer paused for rotation')
@@ -164,6 +176,8 @@ def generate_launch_description():
                 assert burst_samples>=2,burst_samples
                 assert pauses>0,'gyro burst did not exercise the rate pause'
             result=dict(result='PASS',landings=latest['landings'],stress=args.stress,preparation=args.prepare,
+                hardware_imu=hardware_imu,imu_source=latest['imu_source'],alignment=latest.get('imu_upright_alignment'),
+                peak_correction_deg=peak_correction,
                 peak_tilt_deg=peak,displacement_m=last_x-first_x,
                 max_command_gap_s=max(b-a for a,b in zip(times,times[1:])),
                 rate_pauses=pauses,burst_samples=burst_samples,final_state=latest['state'],

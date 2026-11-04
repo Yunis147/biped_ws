@@ -30,9 +30,11 @@ class QuasiStaticWalker(Node):
                                for field in fields(Settings)})
         source = self.declare_parameter('imu_source', 'auto').value
         mount = self.declare_parameter('imu_mount_rpy', [0., 0., 0.]).value
+        align = self.declare_parameter('align_imu_at_startup', not self.simulation).value
         self.imu_frame = self.declare_parameter('imu_frame', 'imu_link').value
         self.get_logger().info('Loading precomputed quasi-static paths for this robot and settings ...')
-        self.controller = WalkingController(Plans(settings, precomputed=True), simulation=self.simulation, imu_source=source, mount=mount)
+        self.controller = WalkingController(Plans(settings, precomputed=True), simulation=self.simulation,
+            imu_source=source, mount=mount, align_imu_at_startup=align)
         self.plan_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='walking_plan')
         self.preparation = None
         self.pub = self.create_publisher(Float64MultiArray, '/position_controller/commands', 10)
@@ -48,8 +50,10 @@ class QuasiStaticWalker(Node):
             successful=False, reason='restart to change compiled walking/IMU settings'))
         self.last_warning = ''
         self.last_state = None
+        self.alignment_logged = False
         self.get_logger().info(f'Ready: IMU feedback required, planned lean {math.degrees(settings.body_roll):.2f} deg, correction limited to {math.degrees(settings.max_correction):.2f} deg. '
-                               'Initial crouch checks posture with both feet planted. '
+                               f'IMU source {self.controller.imu.source}; upright startup alignment {align}. '
+                               'Initial crouch keeps both feet planted and posture feedback active. '
                                f'Rate-only backoff confirmation {settings.transfer_rate_duration:.2f} s; gyro damping filter {settings.gyro_filter_time:.2f} s. '
                                'No joint commands until stand/start/step; quiet gyro calibration is automatic.')
 
@@ -159,6 +163,14 @@ class QuasiStaticWalker(Node):
         if self.controller.state != 'idle' and self.count_publishers('/position_controller/commands') > 1:
             self.controller.fail('another joint-command publisher is active', self.now(), suppress=True)
         target = self.controller.tick(self.now())
+        alignment = self.controller.imu.upright_alignment
+        if alignment is not None and not self.alignment_logged:
+            self.get_logger().info('IMU aligned once from stationary upright startup pose; '
+                f'source={self.controller.imu.used_source}; '
+                f'gravity tilt={alignment["initial_tilt_deg"]} deg, '
+                f'reported orientation tilt={alignment["initial_orientation_tilt_deg"]} deg; '
+                'reference fixed for this run')
+            self.alignment_logged = True
         if target is not None:
             message = Float64MultiArray()
             message.data = target.tolist()

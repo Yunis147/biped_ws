@@ -155,11 +155,13 @@ def attitude_pose_matrix(nominal, rotation):
 
 
 class WalkingController:
-    def __init__(self, plans=None, *, simulation=False, imu_source='auto', mount=(0., 0., 0.)):
+    def __init__(self, plans=None, *, simulation=False, imu_source='auto', mount=(0., 0., 0.),
+                 align_imu_at_startup=None):
         self.plans = plans or Plans()
         self.s = self.plans.settings
         self.simulation = simulation
         self.imu = TiltEstimator(mount, imu_source)
+        self.align_imu_at_startup = not simulation if align_imu_at_startup is None else bool(align_imu_at_startup)
         self.feedback = ServoFeedback()
         self.state = 'idle'
         self.direction = 'forward'
@@ -171,10 +173,10 @@ class WalkingController:
         self.planned_rate = np.zeros(2)
         self.balance_rate = np.zeros(2)
         self.balance_rate_time = None
+        self.gravity_quiet_since = None
         self.transfer_paused = False
         self.transfer_rate_since = None
         self.preparation_paused = False
-        self.preparation_pause_since = None
         self.segment = None
         self.elapsed = self.waited = self.settled = 0.
         self.last_time = None
@@ -289,7 +291,6 @@ class WalkingController:
         self.transfer_paused = False
         self.transfer_rate_since = None
         self.preparation_paused = False
-        self.preparation_pause_since = None
         new_support = m.STANCE.get(b, self.support)
         self.support = new_support
         try:
@@ -397,6 +398,15 @@ class WalkingController:
     def tick(self, now):
         dt = 0. if self.last_time is None else now-self.last_time
         self.last_time = now
+        # For an explicitly selected raw filter, gravity correction belongs to
+        # quiet dwells; accelerometer direction changes during body translation.
+        quiet = (self.state in ('idle','arming','approach_settle','settling','standing','transfer_hold')
+            and self.feedback.velocity is not None and np.max(np.abs(self.feedback.velocity)) < .03
+            and np.linalg.norm(self.imu.gyro) < .05)
+        self.gravity_quiet_since = (now if self.gravity_quiet_since is None else self.gravity_quiet_since) if quiet else None
+        settled_gravity=bool(quiet and now-self.gravity_quiet_since >= .2)
+        self.imu.gravity_feedback = settled_gravity
+        self.imu.gravity_tau = .1 if settled_gravity else .5
         problem = self.readiness(now)
         if self.state == 'idle':
             return None
@@ -408,18 +418,24 @@ class WalkingController:
                     return None
             self.fail(problem, now, suppress=True)
         if self.state == 'arming' and not self.fault:
-            if not self.imu.calibrated:
+            if np.max(np.abs(self.feedback.q-self.nominal)) > .05 or self.feedback.velocity is None or np.max(np.abs(self.feedback.velocity)) > .08:
+                self.fail('starting pose moved while arming', now, suppress=True)
+            needs_alignment = self.align_imu_at_startup and self.imu.upright_alignment is None
+            if not self.fault and (not self.imu.calibrated or needs_alignment):
                 try:
-                    self.imu.calibrate(now)
+                    if needs_alignment:
+                        if np.max(np.abs(self.nominal)) > 1e-8:
+                            raise ValueError('initial upright alignment requires calibrated startup zero')
+                        self.imu.align_upright(now)
+                    else:
+                        self.imu.calibrate(now)
                 except ValueError as error:
                     self.arming_since = now if self.arming_since is None else self.arming_since
                     self.reason = str(error)
                     if now-self.arming_since > 4.:
                         self.fail(self.reason, now, suppress=True)
                     return None
-            if np.max(np.abs(self.feedback.q-self.nominal)) > .05 or self.feedback.velocity is None or np.max(np.abs(self.feedback.velocity)) > .08:
-                self.fail('starting pose moved while arming', now, suppress=True)
-            else:
+            if not self.fault:
                 actual = self.feedback.q.copy()
                 self.approach = np.array([actual+m._smoothstep(u)*(self.nominal-actual) for u in np.linspace(0, 1, 81)])
                 speed, acceleration = m._motion_bounds(self.approach)
@@ -473,19 +489,10 @@ class WalkingController:
             return self.commanded.copy()
         target_angles = tilt(reference_rotation(self.nominal,self.support))
         error = self.imu.angles-target_angles
-        # The initial crouch lowers the body with both feet planted. Near a
-        # straight knee the attitude correction has no authority yet, so a
-        # lateral transfer prediction must not reverse this preparation.
-        preparing = self.state == 'moving' and self.segment == ('neutral','ready')
-        self.preparation_paused = bool(preparing and (np.max(np.abs(error)) > self.s.settle_error
-            or np.linalg.norm(self.imu.gyro[:2]) > self.s.transfer_rate))
-        if self.preparation_paused:
-            self.preparation_pause_since = now if self.preparation_pause_since is None else self.preparation_pause_since
-            if now-self.preparation_pause_since > self.s.settle_timeout:
-                self.fail('initial crouch did not stabilize; check level stance and IMU mounting; last target held',now)
-                return self.commanded.copy()
-        else:
-            self.preparation_pause_since = None
+        # Both feet stay planted during the bounded initial crouch. Its old
+        # soft-tilt pause could freeze straight knees before feedback could act.
+        # Hard tilt/tracking checks remain above; settling still gates foot lift.
+        self.preparation_paused = False
         transfer = self.segment is not None and self.segment[1] in ('lean_left', 'lean_right', 'lean_left_cycle')
         self.transfer_paused = False
         if self.state == 'moving' and transfer:
@@ -567,7 +574,10 @@ class WalkingController:
             if self.waited >= minimum and self.settled >= self.s.settle_duration:
                 self._advance(now)
             elif self.waited > minimum+self.s.settle_timeout:
-                self.fail('body/servos did not settle; next phase blocked', now)
+                self.fail('body/servos did not settle; next phase blocked; '
+                    f'roll/pitch error={np.degrees(error).round(3).tolist()} deg, '
+                    f'gyro={self.imu.gyro[:2].round(4).tolist()} rad/s, '
+                    f'tracking error={self.tracking_error:.4f} rad', now)
         if self.fault:
             return self.commanded.copy()
         if not landing and self.state == 'moving' and self.segment[1].startswith('place_'):
@@ -577,7 +587,7 @@ class WalkingController:
         # Backtrack the complete nominal progress AND attitude correction, never
         # clip separate joint angles. Hold if no synchronized candidate is feasible.
         for scale in (1., .5, .25, .125, 0.):
-            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' and not (self.transfer_paused or self.preparation_paused) else 0.
+            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' and not self.transfer_paused else 0.
             next_elapsed = max(0., self.elapsed+progress*dt*scale)
             nominal = self.nominal.copy()
             if self.state in ('moving', 'recovering'):
@@ -631,7 +641,6 @@ class WalkingController:
             if now-self.pause_since > 1.:
                 self.fail('no feasible bounded feedback target', now)
         self.reason = self.fault or (self.interruption if self.interruption and self.state in ('recovering', 'placement_hold', 'transfer_hold', 'standing') else
-            'initial crouch paused for posture to settle; both feet remain planted' if self.preparation_paused else
             'weight transfer paused for rotation to settle; posture feedback remains active' if self.transfer_paused else self.state)
         return self.commanded.copy()
 
@@ -661,5 +670,7 @@ class WalkingController:
             tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
             predicted_swing_clearance_m=self.clearance, landings=self.landings,
             contact_measured=False, imu_source=self.imu.used_source, placement=placement,
+            imu_upright_alignment=self.imu.upright_alignment,
+            imu_gravity_feedback=self.imu.gravity_feedback,
             interruption=self.interruption, interruption_snapshot=self.interruption_snapshot,
             transfer_backoffs=self.backoffs, target_problem=self.target_problem)

@@ -27,7 +27,8 @@ class WalkingPhysicsTests(unittest.TestCase):
 
     def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False,
                  parameters=None, landings_required=3, rate_spike=False, control_steps=(10,), sensor_delay=0.,
-                 imu_offset=(0.,0.), compensate_mount=False, stand_only=False, startup_rate=False):
+                 imu_offset=(0.,0.), compensate_mount=False, stand_only=False, startup_rate=False,
+                 raw_imu=False,align_startup=False,wrong_quaternion=False,world_reference=(0.,0.)):
         import mujoco
         from test_feedback import controller
         from biped_gait.feedback_walk import NAMES
@@ -50,19 +51,29 @@ class WalkingPhysicsTests(unittest.TestCase):
             sim.model.geom_friction[:, 0] = sim.p['friction']
             sim.data = mujoco.MjData(sim.model)
             sim.reset()
-        from biped_gait.imu import rpy_matrix,quaternion_matrix
+        from biped_gait.imu import rpy_matrix,quaternion_matrix,tilt
         offset=rpy_matrix(*imu_offset)
-        c = controller(simulation=True,mount=(*imu_offset,0.) if compensate_mount else (0.,0.,0.))
+        reported_frame=rpy_matrix(*world_reference)
+        c = controller(simulation=True,mount=(*imu_offset,0.) if compensate_mount else (0.,0.,0.),
+            imu_source='raw' if raw_imu else 'auto',align_imu_at_startup=align_startup)
         def imu_reading():
             quat,gyro,accel=sim.imu()
-            if any(imu_offset):
+            if any(imu_offset) or any(world_reference):
                 reported=np.zeros(4)
-                mujoco.mju_mat2Quat(reported,(quaternion_matrix(quat)@offset).ravel())
+                mujoco.mju_mat2Quat(reported,(reported_frame@quaternion_matrix(quat)@offset).ravel())
                 quat=reported[[1,2,3,0]]
                 gyro=offset.T@gyro;accel=offset.T@accel
+            if raw_imu:gyro=gyro+np.array([.006,-.004,.002])
+            if wrong_quaternion:quat=(.3,.2,.1,.92736)
             if startup_rate and c.segment==('neutral','ready') and .2<=c.elapsed<=.3:
                 gyro=gyro.copy();gyro[1]-=math.radians(1.5)
             return quat,gyro,accel
+        def update_imu(gyro,accel,quat,now,**kwargs):
+            try:c.imu.update(gyro,accel,quat,now,**kwargs)
+            except ValueError as error:
+                # Match the ROS boundary while the spawned model is briefly
+                # in free fall, before a raw gravity estimate can initialize.
+                if c.state!='idle' or 'stationary gravity sample' not in str(error):raise
         if not gain:
             c.s = replace(c.s, kp=1e-12, kd=1e-12)
         started = stopped = pushed = patch_placed = False
@@ -82,7 +93,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                 if sensor_delay:
                     while sensor_index<len(history) and history[sensor_index][0]<=now-sensor_delay+1e-9:
                         stamp,q,v,quat,gyro,accel=history[sensor_index]
-                        c.imu.update(gyro,accel,quat,now,sample_time=stamp)
+                        update_imu(gyro,accel,quat,now,sample_time=stamp)
                         c.feedback.joints(NAMES,q,v,now,now-stamp)
                         sensor_index+=1
                 else:
@@ -92,7 +103,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                     if spike_left:
                         gyro=gyro.copy();gyro[:2]=c.planned_rate+[-.0728,-.0700]
                         spike_left-=1
-                    c.imu.update(gyro, accel, quat, now)
+                    update_imu(gyro, accel, quat, now)
                     c.feedback.joints(NAMES, sim.joint_positions(), sim.joint_velocities(), now)
                 if now>=2 and not started:
                     c.command('stand' if push or stand_only else direction, now)
@@ -115,6 +126,9 @@ class WalkingPhysicsTests(unittest.TestCase):
                     mujoco.mj_forward(sim.model, sim.data)
                     patch_placed = True
                 target = c.tick(now)
+                if c.backoffs and not transfer_push:
+                    true_tilt=np.degrees(tilt(quaternion_matrix(sim.imu()[0])))
+                    self.fail('unexpected transfer reversal: true body tilt '+str(true_tilt.tolist())+'; '+str(c.status(now)))
                 rate_pauses+=int(getattr(c,'transfer_paused',False))
                 if c.segment and c.segment[1] in ('swing_right','swing_left'):
                     from biped_gait.placement import ground_estimate
@@ -222,3 +236,24 @@ class WalkingPhysicsTests(unittest.TestCase):
     def test_known_imu_mount_rotation_completes_six_landings(self):
         self.run_case(parameters=self.launch_parameters,landings_required=6,
                       imu_offset=np.radians([.77,-.88]),compensate_mount=True,startup_rate=True)
+
+    def test_hardware_startup_mount_and_orientation_reference_alignment_walk_six_landings(self):
+        self.run_case(landings_required=6,imu_offset=np.radians([2.2,-1.9]),
+            world_reference=np.radians([3.,-2.]),align_startup=True)
+
+    def test_aligned_hardware_imu_backward_six_landings(self):
+        self.run_case('backward',landings_required=6,imu_offset=np.radians([2.2,-1.9]),
+            world_reference=np.radians([3.,-2.]),align_startup=True)
+
+    def test_raw_imu_feedback_reduces_standing_disturbance(self):
+        args=dict(push=True,imu_offset=np.radians([2.2,-1.9]),raw_imu=True,align_startup=True)
+        without=self.run_case(gain=False,**args)
+        with_feedback=self.run_case(**args)
+        self.assertLess(with_feedback['integral'],without['integral'])
+
+    def test_aligned_reported_orientation_feedback_reduces_standing_disturbance(self):
+        args=dict(push=True,imu_offset=np.radians([2.2,-1.9]),
+            world_reference=np.radians([3.,-2.]),align_startup=True)
+        without=self.run_case(gain=False,**args)
+        with_feedback=self.run_case(**args)
+        self.assertLess(with_feedback['integral'],without['integral'])
