@@ -69,6 +69,41 @@ not need repeating. Start requires stationary joints near calibrated zero or
 the last held stance. `hold` latches a hard stop; `calibrate` recalibrates the
 stationary gyro bias. Neither performs fall recovery or switches torque off.
 
+If startup stops in `('neutral', 'ready')`, the robot has not reached sideways
+weight transfer or foot lift. This phase lowers the body with both feet planted.
+It takes about 16.6 seconds; after only 0.22 seconds the knee command is about
+0.2°, so a reversal there can look like no movement on the real robot.
+
+The initial crouch has its own checks: pause progress if measured roll/pitch
+error exceeds 1.5° or horizontal gyro rate exceeds 0.10 rad/s. Keep posture
+feedback active where knee bend permits. Resume when readings are within these
+limits; fault if a pause lasts over four seconds. Before the first lean, the
+crouch must settle using the normal tilt, gyro and encoder checks.
+
+This avoids applying the sideways-transfer prediction too early. For example,
+a pitch error of -0.88° and pitch rate of -0.026 rad/s previously gave:
+
+```text
+predicted pitch error = -0.88° + 0.25 s * (-0.026 rad/s * 57.296°/rad)
+                      = about -1.252°
+```
+
+The old check reversed the initial crouch at the 1.25° transfer threshold.
+Near straight knees, the existing correction authority is zero below 0.20 rad
+(about 11.5°) of knee bend, so it could not correct that small starting tilt
+before the reversal. The corrected preparation can bend the knees first.
+Sideways lean phases still use the 1.25° prediction check.
+
+Gyro calibration removes gyro bias; it does not remove measured tilt. A small
+nonzero tilt at calibrated zero can be real body lean or IMU mounting error.
+Determine which before changing `imu_mount_rpy`: the same tilt is used for foot
+height calculations. Automatically subtracting it could hide a real lean.
+In a constructed simulation with an uncorrected 0.77°/-0.88° sensor mounting
+offset, crouching succeeds but placement later stops with about 0.57 mm estimated
+clearance remaining. Correcting that known mounting transform allows the same
+model to complete six landings. These experiments do not identify the physical
+robot's mounting angle from one log.
+
 A `placement_hold` or `transfer_hold` needs physical support and a restart from
 a known stance. These states retain bounded posture feedback and prohibit new
 steps. A hard `fault` also requires restart. Do not repeatedly send `start` to
@@ -456,7 +491,7 @@ filtered value. Reading the same sensor timestamp twice does not advance this
 filter. The interruption checks below still use the original gyro reading;
 smoothing the damping command does not hide a dangerous rate or tilt.
 
-During a double-support transfer, look a short time ahead:
+During a sideways double-support transfer, look a short time ahead:
 
 ```text
 error rate = measured gyro rate - planned body rotation rate
@@ -562,6 +597,7 @@ commands from the workspace directory, one at a time:
 ```bash
 python3 -B src/biped_gait/test/run_mujoco_walk.py --landings 12
 python3 -B src/biped_gait/test/run_mujoco_walk.py --landings 6 --stress --domain 210
+python3 -B src/biped_gait/test/run_mujoco_walk.py --prepare --domain 213
 ```
 
 They start their own headless simulation in a private ROS domain restricted to
@@ -575,6 +611,12 @@ in the transfer after the first landing. It checks that the controller pauses,
 resumes and completes the following steps. This is a deliberately constructed
 test, not a recording of the physical robot's IMU.
 
+The preparation run supplies constructed initial IMU tilt of 0.77°/-0.88° at
+50 Hz and a short pitch-rate change during the initial crouch. It requests only
+`stand` and requires bent knees, zero landings and zero transfer reversals.
+The ROS/MuJoCo run completes in about 23.6 seconds including a two-second hold,
+with peak actual torso tilt about 0.19° and no reversal.
+
 Physics tests require MuJoCo and xacro. They use simulated IMU/encoders, the
 current URDF, 50 Hz control, assumed stiffness 50 N·m/rad and 50% of assumed stall
 torque. The controller completes three landings in each direction and returns
@@ -582,7 +624,16 @@ to standing. Peak torso tilt is about 3.92° forward and 3.82° backward. A rais
 patch test interrupts placement and checks bounded relief with active feedback.
 These are simulation results, not identified hardware gains or torque ratings.
 
-All 62 gait tests pass. They include a brief rate-only burst after landing,
+The full 71-test suite passes in an isolated validation environment with
+Python 3.12, NumPy 2.2.6 and MuJoCo 3.17.0. The ROS preparation replay also
+passes with NumPy 1.26.4. Some combined runs on this development machine using
+NumPy 1.26.4 ended in a native segmentation fault in NumPy operations; an
+individual affected test and a full debugger run passed. The native crash's
+root cause is not confirmed. The robot's numerical dependencies are unchanged.
+
+The tests include the hardware-like crouch readings,
+preparation pause/resume/timeout, a known IMU mounting transform,
+a brief rate-only burst after landing,
 six landings with 20 ms sensor delay and uneven control intervals, repeated
 sensor timestamps, and sustained-rate/immediate-tilt recovery checks.
 A 3 N sideways pulse for 0.1 seconds during double-support

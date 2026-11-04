@@ -26,7 +26,8 @@ class WalkingPhysicsTests(unittest.TestCase):
             cls.urdf = xacro.process_file(str(p), mappings={'use_sim': 'false'}).toxml()
 
     def run_case(self, direction='forward', push=False, gain=True, obstacle=False, transfer_push=False,
-                 parameters=None, landings_required=3, rate_spike=False, control_steps=(10,), sensor_delay=0.):
+                 parameters=None, landings_required=3, rate_spike=False, control_steps=(10,), sensor_delay=0.,
+                 imu_offset=(0.,0.), compensate_mount=False, stand_only=False, startup_rate=False):
         import mujoco
         from test_feedback import controller
         from biped_gait.feedback_walk import NAMES
@@ -49,7 +50,19 @@ class WalkingPhysicsTests(unittest.TestCase):
             sim.model.geom_friction[:, 0] = sim.p['friction']
             sim.data = mujoco.MjData(sim.model)
             sim.reset()
-        c = controller(simulation=True)
+        from biped_gait.imu import rpy_matrix,quaternion_matrix
+        offset=rpy_matrix(*imu_offset)
+        c = controller(simulation=True,mount=(*imu_offset,0.) if compensate_mount else (0.,0.,0.))
+        def imu_reading():
+            quat,gyro,accel=sim.imu()
+            if any(imu_offset):
+                reported=np.zeros(4)
+                mujoco.mju_mat2Quat(reported,(quaternion_matrix(quat)@offset).ravel())
+                quat=reported[[1,2,3,0]]
+                gyro=offset.T@gyro;accel=offset.T@accel
+            if startup_rate and c.segment==('neutral','ready') and .2<=c.elapsed<=.3:
+                gyro=gyro.copy();gyro[1]-=math.radians(1.5)
+            return quat,gyro,accel
         if not gain:
             c.s = replace(c.s, kp=1e-12, kd=1e-12)
         started = stopped = pushed = patch_placed = False
@@ -61,7 +74,7 @@ class WalkingPhysicsTests(unittest.TestCase):
         spike_left=rate_pauses=0;spike_started=False
         for i in range(int(260/.002)):
             if sensor_delay and i%5 == 0:
-                quat,gyro,accel=sim.imu()
+                quat,gyro,accel=imu_reading()
                 history.append((sim.time,sim.joint_positions().copy(),sim.joint_velocities().copy(),quat,gyro.copy(),accel.copy()))
             if i == control_due:
                 control_due+=control_steps[control_index%len(control_steps)];control_index+=1
@@ -73,7 +86,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                         c.feedback.joints(NAMES,q,v,now,now-stamp)
                         sensor_index+=1
                 else:
-                    quat, gyro, accel = sim.imu()
+                    quat, gyro, accel = imu_reading()
                     if rate_spike and not spike_started and c.segment == ('place_right','lean_right') and c.elapsed>c.plan.durations[c.segment]*.5:
                         spike_started=True;spike_left=2
                     if spike_left:
@@ -82,14 +95,14 @@ class WalkingPhysicsTests(unittest.TestCase):
                     c.imu.update(gyro, accel, quat, now)
                     c.feedback.joints(NAMES, sim.joint_positions(), sim.joint_velocities(), now)
                 if now>=2 and not started:
-                    c.command('stand' if push else direction, now)
+                    c.command('stand' if push or stand_only else direction, now)
                     started = True
                 if transfer_push and not pushed and c.segment == ('ready','lean_left') and c.elapsed > c.plan.durations[c.segment]*.4:
                     sim.push([0.,3.,0.],.1)
                     pushed = True
                 if transfer_push and c.backoffs and c.state == 'standing':
                     stopped = True
-                if not push and not obstacle and not transfer_push and c.landings>=landings_required and not stopped:
+                if not push and not stand_only and not obstacle and not transfer_push and c.landings>=landings_required and not stopped:
                     c.command('stop', now)
                     stopped = True
                 if obstacle and not patch_placed and c.segment == ('swing_right', 'place_right'):
@@ -129,6 +142,7 @@ class WalkingPhysicsTests(unittest.TestCase):
                         return dict(interruption=c.interruption, peak=peak, landings=c.landings)
                     self.fail(str(c.status(now)))
                 if c.state == 'standing':
+                    if stand_only:stopped=True
                     if standing is None:
                         standing = now
                     if stopped and finished is None:
@@ -151,6 +165,11 @@ class WalkingPhysicsTests(unittest.TestCase):
             self.assertGreaterEqual(c.backoffs,1)
             self.assertEqual(c.landings,0)
             self.assertEqual(c.state,'standing')
+        elif stand_only:
+            self.assertEqual(c.state,'standing')
+            self.assertEqual(c.landings,0)
+            self.assertEqual(c.backoffs,0)
+            self.assertGreater(min(-c.nominal[NAMES.index(s+'_knee_joint')] for s in 'rl'),.2)
         elif not push:
             self.assertEqual(c.landings,landings_required)
             self.assertEqual(c.state,'standing')
@@ -195,3 +214,11 @@ class WalkingPhysicsTests(unittest.TestCase):
     def test_delayed_sensors_and_uneven_control_complete_six_landings(self):
         self.run_case(parameters=self.launch_parameters,landings_required=6,
                       control_steps=(10,10,20,10),sensor_delay=.02)
+
+    def test_hardware_like_initial_readings_allow_a_bent_stand(self):
+        self.run_case(parameters=self.launch_parameters,stand_only=True,
+                      imu_offset=np.radians([.77,-.88]),startup_rate=True)
+
+    def test_known_imu_mount_rotation_completes_six_landings(self):
+        self.run_case(parameters=self.launch_parameters,landings_required=6,
+                      imu_offset=np.radians([.77,-.88]),compensate_mount=True,startup_rate=True)

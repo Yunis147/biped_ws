@@ -27,7 +27,9 @@ class ServoFeedback:
             if not np.all(np.isfinite(q)):
                 raise ValueError('joint states must contain all 12 finite positions')
             if np.any(q < model.LO) or np.any(q > model.HI):
-                raise ValueError('measured joint outside URDF limits; check calibration')
+                index = int(np.flatnonzero((q < model.LO) | (q > model.HI))[0])
+                raise ValueError(f'measured joint outside URDF limits: {NAMES[index]}={q[index]:.6f} rad, '
+                    f'allowed [{model.LO[index]:.6f}, {model.HI[index]:.6f}]; check calibration')
             if len(velocities) == len(names) and np.all(np.isfinite(velocities)):
                 speeds = dict(zip(names, velocities))
                 velocity = np.array([speeds[n] for n in NAMES])

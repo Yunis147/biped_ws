@@ -173,6 +173,8 @@ class WalkingController:
         self.balance_rate_time = None
         self.transfer_paused = False
         self.transfer_rate_since = None
+        self.preparation_paused = False
+        self.preparation_pause_since = None
         self.segment = None
         self.elapsed = self.waited = self.settled = 0.
         self.last_time = None
@@ -280,11 +282,14 @@ class WalkingController:
 
     def _begin(self, a, b):
         self.segment, self.state = (a, b), 'moving'
+        self.reason = 'moving'
         self.clearance, self.landing_cues = None, {}
         self.elapsed = self.waited = self.settled = 0.
         self.planned_rate[:] = 0.
         self.transfer_paused = False
         self.transfer_rate_since = None
+        self.preparation_paused = False
+        self.preparation_pause_since = None
         new_support = m.STANCE.get(b, self.support)
         self.support = new_support
         try:
@@ -464,10 +469,24 @@ class WalkingController:
                     self._begin('neutral', 'ready')
                 elif self.elapsed > 5.:
                     self.fail('starting stance did not settle', now)
+            self.reason = self.fault or self.state
             return self.commanded.copy()
         target_angles = tilt(reference_rotation(self.nominal,self.support))
         error = self.imu.angles-target_angles
-        transfer = self.segment is not None and self.segment[1] in ('ready', 'lean_left', 'lean_right', 'lean_left_cycle')
+        # The initial crouch lowers the body with both feet planted. Near a
+        # straight knee the attitude correction has no authority yet, so a
+        # lateral transfer prediction must not reverse this preparation.
+        preparing = self.state == 'moving' and self.segment == ('neutral','ready')
+        self.preparation_paused = bool(preparing and (np.max(np.abs(error)) > self.s.settle_error
+            or np.linalg.norm(self.imu.gyro[:2]) > self.s.transfer_rate))
+        if self.preparation_paused:
+            self.preparation_pause_since = now if self.preparation_pause_since is None else self.preparation_pause_since
+            if now-self.preparation_pause_since > self.s.settle_timeout:
+                self.fail('initial crouch did not stabilize; check level stance and IMU mounting; last target held',now)
+                return self.commanded.copy()
+        else:
+            self.preparation_pause_since = None
+        transfer = self.segment is not None and self.segment[1] in ('lean_left', 'lean_right', 'lean_left_cycle')
         self.transfer_paused = False
         if self.state == 'moving' and transfer:
             # Predict ERROR growth. The commanded body rotation is intentional,
@@ -508,7 +527,7 @@ class WalkingController:
                 self.stop_requested = True
                 self.backoffs += 1
                 self.interruption = ('weight transfer backed off before foot lift; '
-                    f'predicted error={float(np.degrees(np.max(np.abs(predicted)))):.2f} deg (limit {math.degrees(self.s.transfer_error):.2f}), '
+                    f'predicted error={float(np.degrees(np.max(np.abs(predicted)))):.3f} deg (limit {math.degrees(self.s.transfer_error):.3f}), '
                     f'roll/pitch error={np.degrees(error).round(2).tolist()} deg, '
                     f'planned rate={self.planned_rate.round(4).tolist()} rad/s, '
                     f'error rate={rate_error:.3f} rad/s (entry {self.s.transfer_rate:.3f}, release {.8*self.s.transfer_rate:.3f}, duration {rate_duration:.3f} s); '
@@ -558,7 +577,7 @@ class WalkingController:
         # Backtrack the complete nominal progress AND attitude correction, never
         # clip separate joint angles. Hold if no synchronized candidate is feasible.
         for scale in (1., .5, .25, .125, 0.):
-            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' and not self.transfer_paused else 0.
+            progress = -1. if self.state == 'recovering' else 1. if self.state == 'moving' and not (self.transfer_paused or self.preparation_paused) else 0.
             next_elapsed = max(0., self.elapsed+progress*dt*scale)
             nominal = self.nominal.copy()
             if self.state in ('moving', 'recovering'):
@@ -612,6 +631,7 @@ class WalkingController:
             if now-self.pause_since > 1.:
                 self.fail('no feasible bounded feedback target', now)
         self.reason = self.fault or (self.interruption if self.interruption and self.state in ('recovering', 'placement_hold', 'transfer_hold', 'standing') else
+            'initial crouch paused for posture to settle; both feet remain planted' if self.preparation_paused else
             'weight transfer paused for rotation to settle; posture feedback remains active' if self.transfer_paused else self.state)
         return self.commanded.copy()
 
@@ -636,6 +656,7 @@ class WalkingController:
             planned_rate_rad_s=self.planned_rate.tolist(),
             balance_rate_rad_s=self.balance_rate.tolist(),
             transfer_rate_paused=self.transfer_paused,
+            preparation_paused=self.preparation_paused,
             correction_deg=np.degrees(self.correction).tolist(), maximum_lean_deg=math.degrees(self.s.body_roll),
             tracking_joint=self.tracking_joint, tracking_error_rad=self.tracking_error,
             predicted_swing_clearance_m=self.clearance, landings=self.landings,

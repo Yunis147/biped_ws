@@ -16,10 +16,10 @@ def plans():
     return Plans(precomputed=True)
 
 
-def controller(simulation=False):
+def controller(simulation=False, **kwargs):
     p = Plans.__new__(Plans)
     p.settings, p.cache = plans().settings, dict(plans().cache)
-    return WalkingController(p, simulation=simulation)
+    return WalkingController(p, simulation=simulation, **kwargs)
 
 
 def feed(c, now, q=None, angles=None, gyro=(0., 0., 0.)):
