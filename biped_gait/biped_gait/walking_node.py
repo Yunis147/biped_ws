@@ -1,4 +1,4 @@
-"""ROS boundary for the IMU-feedback quasi-static walker. No torque operations."""
+"""ROS boundary for the model-based quasi-static walker. No torque operations."""
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
@@ -14,10 +14,10 @@ from rclpy.clock_type import ClockType
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.msg import SetParametersResult
-from sensor_msgs.msg import Imu, JointState
+from sensor_msgs.msg import JointState
 from diagnostic_msgs.msg import DiagnosticArray
 from std_msgs.msg import Float64MultiArray, String
-from .feedback_walk import WalkingController, Plans, Settings
+from .model_walk import WalkingController, Plans, Settings
 from .plan_store import prepare
 
 
@@ -28,34 +28,26 @@ class QuasiStaticWalker(Node):
         default = Settings()
         settings = Settings(**{field.name: self.declare_parameter(field.name, getattr(default, field.name)).value
                                for field in fields(Settings)})
-        source = self.declare_parameter('imu_source', 'auto').value
-        mount = self.declare_parameter('imu_mount_rpy', [0., 0., 0.]).value
-        align = self.declare_parameter('align_imu_at_startup', not self.simulation).value
-        self.imu_frame = self.declare_parameter('imu_frame', 'imu_link').value
         self.get_logger().info('Loading precomputed quasi-static paths for this robot and settings ...')
-        self.controller = WalkingController(Plans(settings, precomputed=True), simulation=self.simulation,
-            imu_source=source, mount=mount, align_imu_at_startup=align)
+        self.controller = WalkingController(Plans(settings, precomputed=True), simulation=self.simulation)
         self.plan_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix='walking_plan')
         self.preparation = None
         self.pub = self.create_publisher(Float64MultiArray, '/position_controller/commands', 10)
         self.status_pub = self.create_publisher(String, '/walk/status', 10)
         self.create_subscription(String, '/walk_cmd', self.command, 10)
-        self.create_subscription(Imu, '/imu', self.imu, qos_profile_sensor_data)
         self.create_subscription(JointState, '/joint_states', self.joints, qos_profile_sensor_data)
         self.create_subscription(DiagnosticArray, '/diagnostics', self.diagnostics, 10)
         self.timer_clock = self.get_clock() if self.simulation else Clock(clock_type=ClockType.STEADY_TIME)
         self.create_timer(.02, self.tick, clock=self.timer_clock)
         self.create_timer(.5, self.publish_status, clock=self.timer_clock)
         self.add_on_set_parameters_callback(lambda params: SetParametersResult(
-            successful=False, reason='restart to change compiled walking/IMU settings'))
+            successful=False, reason='restart to change compiled walking settings'))
         self.last_warning = ''
         self.last_state = None
-        self.alignment_logged = False
-        self.get_logger().info(f'Ready: IMU feedback required, planned lean {math.degrees(settings.body_roll):.2f} deg, correction limited to {math.degrees(settings.max_correction):.2f} deg. '
-                               f'IMU source {self.controller.imu.source}; upright startup alignment {align}. '
-                               'Initial crouch keeps both feet planted and posture feedback active. '
-                               f'Rate-only backoff confirmation {settings.transfer_rate_duration:.2f} s; gyro damping filter {settings.gyro_filter_time:.2f} s. '
-                               'No joint commands until stand/start/step; quiet gyro calibration is automatic.')
+        self.get_logger().info(f'Ready: model-based walking, step {settings.step_length*100:.1f} cm, '
+                               f'planned torso roll {math.degrees(settings.body_roll):.2f} deg. '
+                               'Uses URDF geometry, masses and joint positions. '
+                               'No joint commands until stand/start/step.')
 
     def now(self):
         return self.get_clock().now().nanoseconds*1e-9 if self.simulation else time.monotonic()
@@ -68,24 +60,6 @@ class QuasiStaticWalker(Node):
         if str(error) != self.last_warning:
             self.get_logger().warning(str(error))
             self.last_warning = str(error)
-
-    def imu(self, message):
-        try:
-            if message.header.frame_id != self.imu_frame:
-                raise ValueError('IMU frame mismatch: expected '+self.imu_frame)
-            if not -.05 <= self.age(message.header) <= .25:
-                raise ValueError('stale/invalid IMU source timestamp')
-            if message.angular_velocity_covariance[0] < 0 or message.linear_acceleration_covariance[0] < 0:
-                raise ValueError('IMU gyro and accelerometer required')
-            g, a, q = message.angular_velocity, message.linear_acceleration, message.orientation
-            sample_time = message.header.stamp.sec+message.header.stamp.nanosec*1e-9
-            self.controller.imu.update([g.x, g.y, g.z], [a.x, a.y, a.z], [q.x, q.y, q.z, q.w],
-                self.now(), orientation_valid=message.orientation_covariance[0] >= 0,
-                sample_time=sample_time)
-            self.controller.imu_problem = ''
-        except ValueError as error:
-            self.controller.imu_problem = str(error)
-            self.warn(error)
 
     def joints(self, message):
         try:
@@ -137,7 +111,7 @@ class QuasiStaticWalker(Node):
                         # rebuilding from the stance left by a completed step.
                         future = self.plan_worker.submit(prepare, c.s, direction, initial)
                         self.preparation = (future, text, direction, initial)
-                        self.get_logger().info('Preparing path; current stance feedback remains active')
+                        self.get_logger().info('Preparing path; current stance commands continue')
                         return
             elif self.preparation is not None and text not in ('status', 'stop', 'hold'):
                 raise ValueError('wait for path calculation, or cancel with stop/hold')
@@ -163,14 +137,6 @@ class QuasiStaticWalker(Node):
         if self.controller.state != 'idle' and self.count_publishers('/position_controller/commands') > 1:
             self.controller.fail('another joint-command publisher is active', self.now(), suppress=True)
         target = self.controller.tick(self.now())
-        alignment = self.controller.imu.upright_alignment
-        if alignment is not None and not self.alignment_logged:
-            self.get_logger().info('IMU aligned once from stationary upright startup pose; '
-                f'source={self.controller.imu.used_source}; '
-                f'gravity tilt={alignment["initial_tilt_deg"]} deg, '
-                f'reported orientation tilt={alignment["initial_orientation_tilt_deg"]} deg; '
-                'reference fixed for this run')
-            self.alignment_logged = True
         if target is not None:
             message = Float64MultiArray()
             message.data = target.tolist()

@@ -1,50 +1,32 @@
-# Precomputed quasi-static profile; compile_walk regenerates model-dependent paths.
+# Model-based profile. Lengths in metres, angles in radians, time in seconds.
 quasi_static_walker:
   ros__parameters:
-    body_roll: 0.06
-    crouch: 0.026
+    step_length: 0.03
+    stance_width: 0.09
+    body_roll: 0.04
+    crouch: 0.024
     centre_crouch: 0.018
     com_inset: 0.01
     support_margin: 0.008
     clearance: 0.006
-    lift_clearance: 0.004
-    kp: 0.3
-    kd: 0.04
-    gyro_filter_time: 0.04
-    max_correction: 0.026179938779914945
-    correction_rate: 0.05
-    max_joint_speed: 0.25
-    landing_speed: 0.002
-    landing_tilt_error: 0.026179938779914945
-    landing_rotation_rate: 0.12
-    landing_tracking_error: 0.035
+    lift_clearance: 0.005
+    max_joint_speed: 0.18
+    landing_speed: 0.0015
+    landing_tracking_error: 0.025
     landing_sole_tilt: 0.03490658503988659
     landing_clearance: 0.0
     placement_tolerance: 0.0003
     minimum_knee_bend: 0.12
-    landing_alignment_clearance: 0.004
+    landing_alignment_clearance: 0.001
     landing_xy_speed: 0.003
     landing_xy_tolerance: 0.001
     placement_ramp_time: 1.0
     placement_capture_acceleration: 0.3
-    transfer_error: 0.02181661564992912
-    transfer_rate: 0.1
-    transfer_rate_duration: 0.1
-    transfer_lookahead: 0.25
     penetration_tolerance: 0.001
-    fault_tilt: 0.13962634015954636
     tracking_pause: 0.04
     tracking_fault: 0.15
     tracking_timeout: 2.0
-    settle_error: 0.026179938779914945
+    settle_tracking_error: 0.03
+    settle_joint_speed: 0.08
     settle_timeout: 4.0
     settle_duration: 0.4
-    # auto uses the IMU's reported orientation when available.
-    imu_source: auto
-    # align_imu_at_startup defaults true on hardware, false in simulation.
-    # Hardware startup must be upright at calibrated zero on a level floor.
-    imu_frame: imu_link
-    imu_mount_rpy:
-    - 0.0
-    - 0.0
-    - 0.0

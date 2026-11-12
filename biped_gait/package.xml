@@ -3,7 +3,7 @@
 <package format="3">
   <name>biped_gait</name>
   <version>0.1.0</version>
-  <description>IMU-feedback quasi-static walking for the BipedRobot V2. Publishes joint targets to
+  <description>Model-based quasi-static walking for the BipedRobot V2. Publishes joint targets to
     /position_controller/commands, so it drives Gazebo and the real robot (biped_hardware) identically.</description>
   <maintainer email="you@example.com">biped</maintainer>
   <license>MIT</license>

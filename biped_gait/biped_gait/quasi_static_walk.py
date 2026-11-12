@@ -5,7 +5,7 @@ Robot : AsterisCrack BipedRobot V2        Stack : ROS 2 Jazzy + Gazebo Harmonic
 
 WHAT IT DOES
   Geometry and URDF helpers for the biped. The executable now runs the smaller-
-  lean, IMU-feedback controller in feedback_walk.py / walking_node.py. CPG and
+  lean, joint-feedback controller in model_walk.py / walking_node.py. CPG and
   balance users retain the original pure-helper defaults without modification.
   --check validates the NEW walking profile without ROS or motor commands.
 
@@ -19,20 +19,11 @@ import sys
 
 import numpy as np
 
-try:
-    import rclpy
-    from rclpy.node import Node
-    from std_msgs.msg import Float64MultiArray, String
-    HAVE_ROS = True
-except ImportError:                      # lets `--check` run without ROS
-    HAVE_ROS = False
-    Node = object
-
 # ═══════════════════════════════════════════════════════════════════════
 #  TUNING — metres, radians and seconds. Validated against the rigid robot model.
 # ═══════════════════════════════════════════════════════════════════════
 # Legacy pure-helper defaults for dependent packages. The executable uses
-# Settings in feedback_walk.py / config/walk.yaml, with the smaller lean profile.
+# Settings in model_walk.py / config/walk.yaml, with the smaller lean profile.
 CROUCH_DEPTH = 0.040       # 40 mm below the zero-angle standing height
 BODY_ROLL = 0.20           # 11.46 degrees toward the supporting leg
 STEP_LENGTH = {'forward': 0.020, 'backward': 0.016}  # landing ahead of the other foot
@@ -295,7 +286,8 @@ def _plan(direction, standing=None, profile=None):
         feet[side] = feet[side] + [0, 0, initial_height]
     middle = (feet['r'][:2] + feet['l'][:2]) * 0.5
     initial_com, _ = _com_and_feet(neutral)
-    step = STEP_LENGTH[direction] * (1 if direction == 'forward' else -1)
+    step_length = STEP_LENGTH[direction] if profile is None else profile.get('step_length', STEP_LENGTH[direction])
+    step = step_length * (1 if direction == 'forward' else -1)
     states = {}
 
     def add(name, com, roll=0.0, z=height):
@@ -304,12 +296,20 @@ def _plan(direction, standing=None, profile=None):
 
     add('neutral', initial_com[:2], z=initial_height)
     add('ready', middle, z=centre_height)
-    left_target = lambda: feet['l'][:2] - [0, inset]
-    right_target = lambda: feet['r'][:2] + [0, inset]
+    def support_target(side):
+        target=feet[side][:2].copy()
+        target[1]+=inset if side=='r' else -inset
+        if profile is not None and profile.get('com_x_midpoint',False):
+            target[0]=(feet['r'][0]+feet['l'][0])/2
+        return target
+    left_target = lambda: support_target('l')
+    right_target = lambda: support_target('r')
     add('lean_left', left_target(), -roll)
     feet['r'][2] = lift_clearance
     add('lift_right_1st', left_target(), -roll)
     feet['r'][0] = feet['l'][0] + step
+    if profile is not None and 'stance_width' in profile:
+        feet['r'][1]=feet['l'][1]-profile['stance_width']
     feet['r'][2] = clearance
     add('swing_right', left_target(), -roll)
     feet['r'][2] = 0.0
@@ -318,6 +318,8 @@ def _plan(direction, standing=None, profile=None):
     feet['l'][2] = lift_clearance
     add('lift_left', right_target(), roll)
     feet['l'][0] = feet['r'][0] + step
+    if profile is not None and 'stance_width' in profile:
+        feet['l'][1]=feet['r'][1]+profile['stance_width']
     feet['l'][2] = clearance
     add('swing_left', right_target(), roll)
     feet['l'][2] = 0.0
@@ -552,6 +554,8 @@ def gait_metrics(kf, tables, profile=None):
                 target = feet[loaded][:, :2].mean(axis=0).copy()
                 if profile is not None:
                     target[1] += profile['com_inset'] * (1 if loaded == 'r' else -1)
+                    if profile.get('com_x_midpoint',False):
+                        target[0]=(feet['r'][:,0].mean()+feet['l'][:,0].mean())/2
                 com_error = max(com_error, float(np.linalg.norm(com[:2] - target)))
             for side in 'rl':
                 R, _ = _foot_transform(q, side)
@@ -597,12 +601,12 @@ def report(direction, kf, tables, log, profile=None):
 def main(args=None):
     # Geometry constants/default helper calls above retain the legacy model API
     # used by biped_cpg/biped_balance. The executable uses the new smaller-lean
-    # profile and IMU controller; there is no legacy open-loop ROS publisher.
+    # profile and joint-feedback controller; there is no legacy open-loop ROS publisher.
     if '--check' in sys.argv:
         if __package__ in (None, ''):
             from pathlib import Path
             sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-        from biped_gait.feedback_walk import Plans
+        from biped_gait.model_walk import Plans
         plans = Plans()
         for direction, plan in plans.cache.items():
             print(direction, plan.metrics)

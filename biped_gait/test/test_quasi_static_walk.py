@@ -17,7 +17,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'biped_gait'))
 from biped_gait.robot_model import load_model
-from biped_gait.feedback_walk import Settings
+from biped_gait.model_walk import Settings
 
 
 spec = importlib.util.spec_from_file_location('walker_under_test', ROOT / 'biped_gait/biped_gait/quasi_static_walk.py')
@@ -150,6 +150,7 @@ class WalkingTests(unittest.TestCase):
                             np.testing.assert_allclose(rotation @ R, np.eye(3), atol=2e-6)
                         if loaded:
                             desired = feet[loaded].mean(0)[:2] + [0, self.profile['com_inset'] if loaded == 'r' else -self.profile['com_inset']]
+                            desired[0] = (feet['r'][:,0].mean()+feet['l'][:,0].mean())/2
                             np.testing.assert_allclose(com[:2], desired, atol=2e-6)
                         points = np.concatenate([feet[s] for s in ([loaded] if loaded else 'rl')])
                         # Independently test every support-polygon edge.
@@ -203,7 +204,7 @@ class WalkingTests(unittest.TestCase):
                 trailing = 'l' if leading == 'r' else 'r'
                 _, feet, rotations = self.independent_fk(np.array([kf[phase][n] for n in gait.JOINT_ORDER]))
                 delta = rotations[leading].T @ (feet[leading].mean(0) - feet[trailing].mean(0))
-                self.assertAlmostEqual(delta[0] * sign, gait.STEP_LENGTH[direction], places=6)
+                self.assertAlmostEqual(delta[0] * sign, self.profile['step_length'], places=6)
 
     def test_invalid_targets_and_double_support_errors_are_rejected(self):
         seed = self.gaits['forward'][0]['ready']

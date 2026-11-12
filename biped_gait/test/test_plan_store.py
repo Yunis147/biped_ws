@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import numpy as np
-from test_feedback import plans
-from biped_gait.feedback_walk import Plans
+from test_model_walk import plans
+from biped_gait.model_walk import Plans
 from biped_gait import plan_store as store
 
 

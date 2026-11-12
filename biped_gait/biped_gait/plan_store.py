@@ -8,7 +8,7 @@ import tempfile
 import numpy as np
 from . import quasi_static_walk as m
 
-VERSION = 2
+VERSION = 3
 BUNDLED = Path(__file__).with_name('data')
 
 
@@ -61,7 +61,7 @@ def save(plan, settings, direction, directory=None):
 
 
 def load(settings, direction, initial, directory=None):
-    from .feedback_walk import Plan
+    from .model_walk import Plan
     key = fingerprint(settings, direction, initial)
     directories = [Path(directory)] if directory is not None else [cache_directory(), BUNDLED]
     for folder in directories:
@@ -95,7 +95,7 @@ def load(settings, direction, initial, directory=None):
 
 
 def prepare(settings, direction, initial):
-    from .feedback_walk import Plan
+    from .model_walk import Plan
     try:
         return load(settings, direction, initial)
     except ValueError as error:
@@ -107,7 +107,7 @@ def prepare(settings, direction, initial):
 
 def main(args=None):
     import argparse
-    from .feedback_walk import Settings, Plan
+    from .model_walk import Settings, Plan
     parser = argparse.ArgumentParser(description='Compile and check walking paths offline; sends no robot commands')
     parser.add_argument('--config', help='walking ROS parameter YAML; omit for defaults')
     parser.add_argument('--output', help='output directory; default is the user cache')

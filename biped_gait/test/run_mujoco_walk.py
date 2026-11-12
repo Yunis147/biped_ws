@@ -1,12 +1,9 @@
-"""Repeatable ROS/MuJoCo walking check, isolated from the robot's ROS domain.
+"""Real ROS/MuJoCo walking check in a private, localhost-only ROS domain.
 
-Run from a sourced workspace with MuJoCo available. --stress delays sensor
-delivery by 20 ms and inserts a 40 ms gyro-only burst after the first landing.
---prepare replays small startup tilt readings and requests only a bent stand.
-This is a synthetic communication/sensor regression, not a recorded robot bag.
+Checks encoder-only readiness, zero IMU subscriptions, continuous walking,
+stop completion, actual displacement and torso tilt. Sends no hardware commands.
 """
 import argparse
-from collections import deque
 import json
 import math
 import os
@@ -20,122 +17,41 @@ import time
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--landings',type=int,default=12)
-    parser.add_argument('--stress',action='store_true')
-    parser.add_argument('--prepare',action='store_true')
-    parser.add_argument('--hardware-imu',action='store_true',help='upright alignment with synthetic IMU offsets')
-    parser.add_argument('--domain',type=int,default=209)
+    parser.add_argument('--landings',type=int,default=6)
+    parser.add_argument('--direction',choices=('forward','backward'),default='forward')
+    parser.add_argument('--domain',type=int,default=219)
     parser.add_argument('--log-dir',type=Path)
     args=parser.parse_args()
     if args.landings<2 or not 1<=args.domain<=230:
         parser.error('use at least two landings and a private domain from 1 to 230')
-    if (args.prepare or args.hardware_imu) and args.stress:
-        parser.error('run preparation and walking stress checks separately')
     os.environ['ROS_DOMAIN_ID']=str(args.domain)
     os.environ['ROS_AUTOMATIC_DISCOVERY_RANGE']='LOCALHOST'
     os.environ.pop('ROS_LOCALHOST_ONLY',None)
     import rclpy
     from rclpy.parameter import Parameter
-    from rclpy.qos import qos_profile_sensor_data
-    from sensor_msgs.msg import Imu,JointState
     from std_msgs.msg import String,Float64MultiArray
     from nav_msgs.msg import Odometry
 
     logs=args.log_dir or Path(tempfile.mkdtemp(prefix='biped-mujoco-check-'))
     logs.mkdir(parents=True,exist_ok=True)
     launch_cmd=[shutil.which('ros2'),'launch','biped_mujoco','mujoco.launch.py','headless:=true','walk:=true']
-    hardware_imu=args.prepare or args.hardware_imu
-    if args.stress or hardware_imu:
-        launch_file=logs/'stress.launch.py'
-        launch_text='''from pathlib import Path
-from ament_index_python.packages import get_package_share_directory as share
-from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
-def generate_launch_description():
-    sim=IncludeLaunchDescription(PythonLaunchDescriptionSource(str(Path(share('biped_mujoco'))/'launch/mujoco.launch.py')),launch_arguments={'headless':'true','walk':'false'}.items())
-    walk=Node(package='biped_gait',executable='quasi_static_walk',output='screen',parameters=[str(Path(share('biped_gait'))/'config/walk.yaml'),{'use_sim_time':True}],remappings=[('/imu','/gait_test/imu'),('/joint_states','/gait_test/joint_states')])
-    return LaunchDescription([sim,walk])
-'''
-        if hardware_imu:
-            launch_text=launch_text.replace("{'use_sim_time':True}",
-                "{'use_sim_time':True,'imu_source':'auto','align_imu_at_startup':True}")
-        launch_file.write_text(launch_text)
-        launch_cmd=[shutil.which('ros2'),'launch',str(launch_file)]
-
     rclpy.init(domain_id=args.domain)
     node=rclpy.create_node('gait_mujoco_regression',parameter_overrides=[Parameter('use_sim_time',value=True)])
-    latest={};times=[];peak=peak_correction=0.;first_x=last_x=None
-    transfer_start=None;burst_start=None;burst_samples=0
-    preparation_start=None;measured_knees={}
-    pending=deque()
-    def now():return node.get_clock().now().nanoseconds*1e-9
+    latest={};times=[];peak=0.;first_x=last_x=None
     def status(message):
-        nonlocal transfer_start,preparation_start,peak_correction
         latest.clear();latest.update(json.loads(message.data))
-        peak_correction=max(peak_correction,max(abs(v) for v in latest.get('correction_deg',[0.,0.])))
-        if latest.get('segment')==['place_right','lean_right'] and transfer_start is None:
-            transfer_start=now()
-        if latest.get('segment')==['neutral','ready'] and preparation_start is None:
-            preparation_start=now()
-    # Receipt timing can include observer scheduling delays. These messages have
-    # no source timestamp, so this does not establish a publisher deadline.
     def output(message):times.append(time.monotonic())
     def odom(message):
         nonlocal peak,first_x,last_x
         q=message.pose.pose.orientation
-        roll=math.atan2(2*(q.w*q.x+q.y*q.z),1-2*(q.x*q.x+q.y*q.y))
-        pitch=math.asin(max(-1.,min(1.,2*(q.w*q.y-q.z*q.x))))
-        peak=max(peak,math.degrees(max(abs(roll),abs(pitch))))
+        up=1-2*(q.x*q.x+q.y*q.y)
+        peak=max(peak,math.degrees(math.acos(max(-1.,min(1.,up)))))
         last_x=message.pose.pose.position.x
         if first_x is None:first_x=last_x
     node.create_subscription(String,'/walk/status',status,10)
     node.create_subscription(Float64MultiArray,'/position_controller/commands',output,10)
     node.create_subscription(Odometry,'/mujoco/odom',odom,10)
     cmd=node.create_publisher(String,'/walk_cmd',10)
-    if args.stress or hardware_imu:
-        if hardware_imu:
-            import mujoco
-            import numpy as np
-            from biped_gait.imu import rpy_matrix,quaternion_matrix
-            offset=rpy_matrix(*np.radians([2.2,-1.9]))
-        imu_pub=node.create_publisher(Imu,'/gait_test/imu',qos_profile_sensor_data)
-        joint_pub=node.create_publisher(JointState,'/gait_test/joint_states',qos_profile_sensor_data)
-        def enqueue(message,publisher):
-            nonlocal burst_start,burst_samples
-            stamp=message.header.stamp.sec+message.header.stamp.nanosec*1e-9
-            if hardware_imu:
-                if round(stamp*100)%2:return  # Replay at the hardware's 50 Hz.
-                if isinstance(message,Imu):
-                    q=message.orientation;g=message.angular_velocity;a=message.linear_acceleration
-                    reported=np.zeros(4)
-                    mujoco.mju_mat2Quat(reported,(quaternion_matrix([q.x,q.y,q.z,q.w])@offset).ravel())
-                    q.w,q.x,q.y,q.z=map(float,reported)
-                    g.x,g.y,g.z=map(float,offset.T@np.array([g.x,g.y,g.z]))
-                    g.x+=.006;g.y-=.004;g.z+=.002
-                    a.x,a.y,a.z=map(float,offset.T@np.array([a.x,a.y,a.z]))
-                    if preparation_start is not None and .2<=now()-preparation_start<.3:
-                        g.y-=math.radians(1.5);burst_samples+=1
-                else:
-                    positions=dict(zip(message.name,message.position))
-                    measured_knees.update({s:positions[s+'_knee_joint'] for s in 'rl'})
-            elif isinstance(message,Imu) and transfer_start is not None:
-                if burst_start is None and now()-transfer_start>=1.:
-                    burst_start=stamp
-                if burst_start is not None and 0<=stamp-burst_start<.04:
-                    planned=latest.get('planned_rate_rad_s',[0.,0.])
-                    message.angular_velocity.x=planned[0]-.0728
-                    message.angular_velocity.y=planned[1]-.0700
-                    burst_samples+=1
-            pending.append((stamp+(0. if hardware_imu else .02),publisher,message))
-        node.create_subscription(Imu,'/imu',lambda m:enqueue(m,imu_pub),qos_profile_sensor_data)
-        node.create_subscription(JointState,'/joint_states',lambda m:enqueue(m,joint_pub),qos_profile_sensor_data)
-        def deliver():
-            while pending and pending[0][0]<=now():
-                _,publisher,message=pending.popleft();publisher.publish(message)
-        node.create_timer(.005,deliver)
-
     started=time.monotonic()
     with (logs/'launch.log').open('w') as launch_log:
         process=subprocess.Popen(launch_cmd,stdout=launch_log,stderr=subprocess.STDOUT,start_new_session=True)
@@ -144,55 +60,38 @@ def generate_launch_description():
             while time.monotonic()<deadline:
                 rclpy.spin_once(node,timeout_sec=.01)
                 if process.poll() is not None:raise AssertionError('launch exited; see '+str(logs))
-                if latest.get('fault') or latest.get('state') in ('recovering','placement_hold','transfer_hold'):
-                    raise AssertionError(json.dumps(latest))
+                if latest.get('fault') or latest.get('state')=='placement_hold':raise AssertionError(json.dumps(latest))
                 if peak>6.:raise AssertionError(f'torso tilt {peak:.2f} degrees')
                 if check():return
             raise AssertionError('timeout: '+json.dumps(latest))
         try:
-            wait(lambda:latest.get('mode')=='simulation' and latest.get('hardware_ready'),20)
+            wait(lambda:latest.get('mode')=='simulation' and latest.get('hardware_ready') and first_x is not None,20)
             assert not times,'joint commands published before start'
-            cmd.publish(String(data='stand' if args.prepare else 'start'))
-            if args.prepare:
-                wait(lambda:latest.get('state')=='standing',60)
-                held_since=now()
-                wait(lambda:now()-held_since>=2.,5)
-                assert latest['landings']==0,latest
-                assert len(measured_knees)==2 and min(-v for v in measured_knees.values())>.2,measured_knees
-                assert burst_samples>=2,burst_samples
-            else:
-                wait(lambda:latest.get('landings',0)>=args.landings,90+35*args.landings)
-                cmd.publish(String(data='stop'))
-                wait(lambda:latest.get('state')=='standing',70)
-            assert latest.get('transfer_backoffs')==0,latest
-            if hardware_imu:
-                assert latest['imu_upright_alignment'] is not None,latest
-                assert latest['imu_source']=='quaternion',latest
-                if not args.prepare:assert peak_correction>.001,peak_correction
-            if not args.prepare:assert last_x-first_x>.015,(first_x,last_x)
-            launch_log.flush()
-            pauses=(logs/'launch.log').read_text().count('weight transfer paused for rotation')
-            if args.stress:
-                assert burst_samples>=2,burst_samples
-                assert pauses>0,'gyro burst did not exercise the rate pause'
-            result=dict(result='PASS',landings=latest['landings'],stress=args.stress,preparation=args.prepare,
-                hardware_imu=hardware_imu,imu_source=latest['imu_source'],alignment=latest.get('imu_upright_alignment'),
-                peak_correction_deg=peak_correction,
-                peak_tilt_deg=peak,displacement_m=last_x-first_x,
-                max_command_gap_s=max(b-a for a,b in zip(times,times[1:])),
-                rate_pauses=pauses,burst_samples=burst_samples,final_state=latest['state'],
-                elapsed_wall_s=time.monotonic()-started,logs=str(logs))
+            subscriptions=node.get_subscriber_names_and_types_by_node('quasi_static_walker','/')
+            assert all(topic!='/imu' for topic,_ in subscriptions),subscriptions
+            assert latest['orientation_source']=='flat supporting-foot kinematics',latest
+            assert latest['step_length_m']==.03,latest
+            cmd.publish(String(data=args.direction))
+            wait(lambda:latest.get('landings',0)>=args.landings,90+40*args.landings)
+            cmd.publish(String(data='stop'))
+            wait(lambda:latest.get('state')=='standing',70)
+            held_since=node.get_clock().now().nanoseconds*1e-9
+            wait(lambda:node.get_clock().now().nanoseconds*1e-9-held_since>=2.,5)
+            sign=1 if args.direction=='forward' else -1
+            assert sign*(last_x-first_x)>.015*args.landings,(first_x,last_x)
+            result=dict(result='PASS',landings=latest['landings'],direction=args.direction,
+                imu_subscriptions=0,peak_tilt_deg=peak,displacement_m=last_x-first_x,
+                max_observed_command_gap_s=max(b-a for a,b in zip(times,times[1:])),
+                final_state=latest['state'],elapsed_wall_s=time.monotonic()-started,logs=str(logs))
             (logs/'result.json').write_text(json.dumps(result,indent=2)+'\n')
             print(json.dumps(result),flush=True)
         finally:
-            try:
-                node.destroy_node();rclpy.try_shutdown()
-            finally:
-                if process.poll() is None:
-                    os.killpg(process.pid,signal.SIGINT)
-                    try:process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid,signal.SIGKILL);process.wait()
+            node.destroy_node();rclpy.try_shutdown()
+            if process.poll() is None:
+                os.killpg(process.pid,signal.SIGINT)
+                try:process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGKILL);process.wait()
 
 
 if __name__=='__main__':main()

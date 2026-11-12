@@ -2,7 +2,6 @@
 from dataclasses import dataclass
 import numpy as np
 from . import quasi_static_walk as m
-from .imu import rpy_matrix
 
 NAMES = m.JOINT_ORDER
 
@@ -17,14 +16,14 @@ class GroundEstimate:
     stance: str
 
 
-def ground_estimate(measured, angles, stance):
+def ground_estimate(measured, stance):
     """Use the supporting sole as a local plane, including ALL measured joints.
 
     The body origin is arbitrary: z=0 at the body, and negative z below it.
-    Both feet are rotated into gravity axes before their lowest corners compare.
+    Both feet are rotated into the supporting sole axes before their lowest corners compare.
     Flat supporting-foot contact and a correct kinematic model remain assumptions.
     """
-    rotation = rpy_matrix(*angles)
+    rotation = m._foot_transform(dict(zip(NAMES,measured)),stance)[0].T
     _, feet = m._com_and_feet(dict(zip(NAMES, measured)))
     swing = 'r' if stance == 'l' else 'l'
     plane = float((feet[stance] @ rotation.T)[:, 2].min())
@@ -78,9 +77,9 @@ class PhaseGeometry:
 
 
 class Placement:
-    def __init__(self, measured, angles, stance, settings, reference_goal=None):
+    def __init__(self, measured, stance, settings, reference_goal=None):
         self.s = settings
-        g = ground_estimate(measured, angles, stance)
+        g = ground_estimate(measured, stance)
         self.stance = stance
         self.initial_clearance = g.clearance
         self.remaining = max(0., g.clearance-self.s.landing_clearance)
@@ -127,13 +126,13 @@ class Placement:
             raise ValueError('floor projection would straighten the swing knee too far')
         return target
 
-    def target(self, commanded, measured, angles, dt):
+    def target(self, commanded, measured, dt):
         """Lower at most speed*dt from the CURRENT command toward measured ground.
 
         No straight-leg length or fixed torso height enters this calculation.
         A finite entry-height budget prevents an indefinite downward search.
         """
-        g = self.last = ground_estimate(measured, angles, self.stance)
+        g = self.last = ground_estimate(measured, self.stance)
         self.trial_dt = dt
         q = dict(zip(NAMES, commanded))
         actual = dict(zip(NAMES, measured))
@@ -156,23 +155,27 @@ class Placement:
                 raise ValueError('foot reached the estimated floor before horizontal alignment')
             self.aligning = False
             # The measured bent leg has already reached the estimated floor.
-            # Capture its angles; do not finish a remaining nominal extension.
-            actual = dict(zip(NAMES, measured))
-            # Capture both legs so the next body path starts from a coherent
-            # measured bent-knee stance instead of an old support-leg preload.
-            q = actual
-            positions = {s: g.rotation @ m._sole_center(q,s) for s in 'rl'}
-            for side in 'rl':
-                positions[side][2] = g.plane_z+(max(g.clearance, self.s.landing_clearance) if side == g.swing else 0.)
-                q = m._leg_pose_ik(q, side, g.rotation.T @ positions[side], g.rotation.T @ ground_rotation)
+            # Capture its relative position; discard the remaining nominal extension.
+            # Keep the loaded leg's target: copying its sagged encoder angles
+            # into the command releases supporting effort on every landing.
+            # Express the measured relative foot position in the commanded
+            # support frame, so both soles share a coherent model floor.
+            command_ground = ground_estimate(commanded, self.stance)
+            support_center = m._sole_center(q, g.stance)
+            relative = g.rotation @ (m._sole_center(actual,g.swing)-m._sole_center(actual,g.stance))
+            relative[2] = self.s.landing_clearance
+            position = support_center+command_ground.rotation.T @ relative
+            q = m._leg_pose_ik(q, g.swing, position, m._foot_transform(q,g.stance)[0])
             target = np.array([q[n] for n in NAMES])
             if -target[NAMES.index(g.swing+'_knee_joint')] < self.s.minimum_knee_bend:
                 raise ValueError('measured placement knee is too straight')
             self.touch_target = target.copy()
             self.capture_start = np.array(commanded).copy()
-            self.capture_ground = g
+            self.capture_ground = command_ground
             distance = float(np.max(np.abs(target-commanded)))
+            vertical_distance = abs(command_ground.clearance-self.s.landing_clearance)
             self.capture_duration = max(.4, 1.875*distance/self.s.max_joint_speed,
+                                        1.875*vertical_distance/self.s.landing_speed,
                                         np.sqrt(5.774*distance/self.s.placement_capture_acceleration))
             return self._capture_pose(dt)
         _, feet = m._com_and_feet(q)
@@ -217,10 +220,11 @@ class Placement:
         predicted = float((corners[g.swing] @ g.rotation.T)[:, 2].min()-g.plane_z)
         if predicted < self.s.landing_clearance-1e-6:
             raise ValueError('placement target crosses the estimated floor')
-        done = (next_clearance <= self.s.landing_clearance+1e-6 and
-                g.clearance <= self.s.landing_clearance+self.s.placement_tolerance)
-        exhausted = not self.aligning and self.remaining <= 1e-7 and not done
-        return target, descent, done, exhausted
+        # Completion goes through the capture branch on the next encoder
+        # update. Otherwise a zero-height trial could skip capture entirely,
+        # carrying an inconsistent support plane into the following transfer.
+        exhausted = not self.aligning and self.remaining <= 1e-7
+        return target, descent, False, exhausted
 
     def accept(self, descent):
         self.motion_time += self.trial_dt
@@ -229,13 +233,13 @@ class Placement:
         self.remaining = max(0., self.remaining-descent)
         self.commanded_descent += descent
 
-    def relief(self, commanded, measured, angles):
+    def relief(self, commanded, measured):
         """Remove swing-servo tracking pressure and request only a 1 mm lift.
 
         The stance leg retains its load-bearing target. The caller rate-limits
-        the full transition and keeps posture feedback active while waiting.
+        the full transition and continues sending the stance target while waiting.
         """
-        g = ground_estimate(measured, angles, self.stance)
+        g = ground_estimate(measured, self.stance)
         q = dict(zip(NAMES, commanded))
         actual = dict(zip(NAMES, measured))
         for joint in m.LEG[g.swing]:
