@@ -8,7 +8,7 @@ import tempfile
 import numpy as np
 from . import quasi_static_walk as m
 
-VERSION = 3
+VERSION = 4
 BUNDLED = Path(__file__).with_name('data')
 
 
@@ -20,6 +20,7 @@ def _json(value):
 def fingerprint(settings, direction, initial):
     model = dict(legs=m.LEG, base=m.BASE, soles=m.SOLE)
     config = dict(profile=settings.profile(), landing_speed=settings.landing_speed,
+                  joint_speed=settings.max_joint_speed,
                   segment_times=m.SEGMENT_TIME, time_scale=m.TIME_SCALE,
                   max_speed=m.MAX_JOINT_SPEED, max_acceleration=m.MAX_JOINT_ACCEL,
                   samples=m.TABLE_SAMPLES)

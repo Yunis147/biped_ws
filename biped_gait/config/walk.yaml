@@ -1,32 +1,14 @@
-# Model-based profile. Lengths in metres, angles in radians, time in seconds.
+# Precomputed position loop: metres, radians and seconds.
 quasi_static_walker:
   ros__parameters:
     step_length: 0.03
     stance_width: 0.09
     body_roll: 0.04
-    crouch: 0.024
+    crouch: 0.021
     centre_crouch: 0.018
     com_inset: 0.01
     support_margin: 0.008
-    clearance: 0.006
-    lift_clearance: 0.005
+    clearance: 0.01
+    lift_clearance: 0.01
     max_joint_speed: 0.18
     landing_speed: 0.0015
-    landing_tracking_error: 0.025
-    landing_sole_tilt: 0.03490658503988659
-    landing_clearance: 0.0
-    placement_tolerance: 0.0003
-    minimum_knee_bend: 0.12
-    landing_alignment_clearance: 0.001
-    landing_xy_speed: 0.003
-    landing_xy_tolerance: 0.001
-    placement_ramp_time: 1.0
-    placement_capture_acceleration: 0.3
-    penetration_tolerance: 0.001
-    tracking_pause: 0.04
-    tracking_fault: 0.15
-    tracking_timeout: 2.0
-    settle_tracking_error: 0.03
-    settle_joint_speed: 0.08
-    settle_timeout: 4.0
-    settle_duration: 0.4

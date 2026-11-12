@@ -1,4 +1,4 @@
-"""Optional joint-only MuJoCo regressions; no hardware connections."""
+"""Optional open-loop MuJoCo regressions; no hardware connections."""
 import importlib.util
 from pathlib import Path
 import sys,tempfile,unittest
@@ -24,33 +24,25 @@ class WalkingPhysicsTests(unittest.TestCase):
             cls.urdf = xacro.process_file(str(p), mappings={'use_sim': 'false'}).toxml()
 
     def run_case(self, direction='forward', parameters=None, landings_required=6,
-                 control_steps=(10,), sensor_delay=0., quantized=False, stand_only=False):
+                 control_steps=(10,), stand_only=False):
         from test_model_walk import controller
         from biped_gait.model_walk import NAMES
         from biped_gait import quasi_static_walk as m
         from biped_mujoco.sim_core import BipedSim
         sim = BipedSim(self.urdf, self.package, parameters or self.launch_parameters)
         self.addCleanup(sim._tmp.cleanup)
-        c = controller(simulation=True)
+        c = controller()
         started = stopped = False
         finished = None
         peak = 0.
         start_x = float(sim.base_pose()[0][0])
         lift_heights = {'r':0.,'l':0.}
-        history = []; sensor_index = 0; control_due = control_index = 0
+        control_due = control_index = 0
         max_speed = 0.; self_contacts = set(); previous_control_time = None
-        for i in range(int(420/.002)):
-            if i%5 == 0:
-                q = sim.joint_positions()
-                if quantized: q = np.round(q/(2*np.pi/4096))*(2*np.pi/4096)
-                history.append((sim.time,q,sim.joint_velocities()))
+        for i in range(int(650/.002)):
             if i == control_due:
                 control_due += control_steps[control_index%len(control_steps)]; control_index += 1
                 now = sim.time
-                while sensor_index<len(history) and history[sensor_index][0]<=now-sensor_delay+1e-9:
-                    stamp,q,v = history[sensor_index]
-                    c.feedback.joints(NAMES,q,v,now,now-stamp)
-                    sensor_index += 1
                 if now>=2 and not started:
                     c.command('stand' if stand_only else direction,now); started=True
                 if c.landings>=landings_required and not stopped:
@@ -62,7 +54,6 @@ class WalkingPhysicsTests(unittest.TestCase):
                     if before is not None:
                         max_speed=max(max_speed,float(np.max(np.abs(target-before)))/(now-previous_control_time))
                 previous_control_time = now
-                if c.fault or c.state=='placement_hold': self.fail(str(c.status(now)))
                 if c.segment and c.segment[1] in ('swing_right','swing_left'):
                     stance='l' if c.segment[1]=='swing_right' else 'r'
                     swing='r' if stance=='l' else 'l'
@@ -89,10 +80,12 @@ class WalkingPhysicsTests(unittest.TestCase):
         if not stand_only:
             sign=1 if direction=='forward' else -1
             self.assertGreater(sign*(float(sim.base_pose()[0][0])-start_x),.015*landings_required)
-            self.assertGreater(min(lift_heights.values()),.001)
-        print('PHYSICS',direction,'kp',sim.p['kp'],'delay',sensor_delay,'quantized',quantized,
+            # Allow simulated servo sag; exact 10 mm command geometry is
+            # independently checked in test_model_walk. Require real clearance.
+            self.assertGreater(min(lift_heights.values()),.005)
+        print('PHYSICS',direction,'kp',sim.p['kp'],'control_steps',control_steps,
               'peak_deg',peak,'landings',c.landings,'displacement_m',float(sim.base_pose()[0][0])-start_x,
-              'max_command_speed',max_speed,flush=True)
+              'lift_heights',lift_heights,'max_command_speed',max_speed,flush=True)
 
     def test_forward_six_landings_and_stop_without_inertial_input(self):
         self.run_case()
@@ -106,8 +99,8 @@ class WalkingPhysicsTests(unittest.TestCase):
     def test_weaker_motors_backward_twelve_landings(self):
         self.run_case('backward',parameters={'kp':50.,'torque_fraction':.5},landings_required=12)
 
-    def test_delayed_quantized_encoders_with_uneven_control(self):
-        self.run_case(control_steps=(10,10,20,10),sensor_delay=.02,quantized=True)
+    def test_uneven_control_intervals(self):
+        self.run_case(control_steps=(10,10,20,10))
 
-    def test_stand_with_encoders_only(self):
+    def test_stand_without_any_feedback(self):
         self.run_case(stand_only=True)

@@ -1,6 +1,6 @@
 """Real ROS/MuJoCo walking check in a private, localhost-only ROS domain.
 
-Checks encoder-only readiness, zero IMU subscriptions, continuous walking,
+Checks zero feedback subscriptions, continuous position output, walking,
 stop completion, actual displacement and torso tilt. Sends no hardware commands.
 """
 import argparse
@@ -60,19 +60,19 @@ def main():
             while time.monotonic()<deadline:
                 rclpy.spin_once(node,timeout_sec=.01)
                 if process.poll() is not None:raise AssertionError('launch exited; see '+str(logs))
-                if latest.get('fault') or latest.get('state')=='placement_hold':raise AssertionError(json.dumps(latest))
                 if peak>6.:raise AssertionError(f'torso tilt {peak:.2f} degrees')
                 if check():return
             raise AssertionError('timeout: '+json.dumps(latest))
         try:
-            wait(lambda:latest.get('mode')=='simulation' and latest.get('hardware_ready') and first_x is not None,20)
+            wait(lambda:latest.get('mode')=='simulation' and latest.get('state')=='idle' and first_x is not None,20)
             assert not times,'joint commands published before start'
             subscriptions=node.get_subscriber_names_and_types_by_node('quasi_static_walker','/')
-            assert all(topic!='/imu' for topic,_ in subscriptions),subscriptions
-            assert latest['orientation_source']=='flat supporting-foot kinematics',latest
+            assert all(topic not in ('/imu','/joint_states','/diagnostics') for topic,_ in subscriptions),subscriptions
+            assert latest['control']=='timed position loop',latest
+            assert latest['foot_lift_m']==.010,latest
             assert latest['step_length_m']==.03,latest
             cmd.publish(String(data=args.direction))
-            wait(lambda:latest.get('landings',0)>=args.landings,90+40*args.landings)
+            wait(lambda:latest.get('landings',0)>=args.landings,90+50*args.landings)
             cmd.publish(String(data='stop'))
             wait(lambda:latest.get('state')=='standing',70)
             held_since=node.get_clock().now().nanoseconds*1e-9
@@ -80,7 +80,7 @@ def main():
             sign=1 if args.direction=='forward' else -1
             assert sign*(last_x-first_x)>.015*args.landings,(first_x,last_x)
             result=dict(result='PASS',landings=latest['landings'],direction=args.direction,
-                imu_subscriptions=0,peak_tilt_deg=peak,displacement_m=last_x-first_x,
+                feedback_subscriptions=0,peak_tilt_deg=peak,displacement_m=last_x-first_x,
                 max_observed_command_gap_s=max(b-a for a,b in zip(times,times[1:])),
                 final_state=latest['state'],elapsed_wall_s=time.monotonic()-started,logs=str(logs))
             (logs/'result.json').write_text(json.dumps(result,indent=2)+'\n')

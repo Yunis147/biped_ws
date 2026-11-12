@@ -5,7 +5,7 @@ Robot : AsterisCrack BipedRobot V2        Stack : ROS 2 Jazzy + Gazebo Harmonic
 
 WHAT IT DOES
   Geometry and URDF helpers for the biped. The executable now runs the smaller-
-  lean, joint-feedback controller in model_walk.py / walking_node.py. CPG and
+  lean, timed position loop in model_walk.py / walking_node.py. CPG and
   balance users retain the original pure-helper defaults without modification.
   --check validates the NEW walking profile without ROS or motor commands.
 
@@ -601,7 +601,7 @@ def report(direction, kf, tables, log, profile=None):
 def main(args=None):
     # Geometry constants/default helper calls above retain the legacy model API
     # used by biped_cpg/biped_balance. The executable uses the new smaller-lean
-    # profile and joint-feedback controller; there is no legacy open-loop ROS publisher.
+    # profile and a timed position loop.
     if '--check' in sys.argv:
         if __package__ in (None, ''):
             from pathlib import Path
